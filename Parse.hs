@@ -68,7 +68,7 @@ mainParse agda s = do
             fmap (Doc meta header) $ collectTests agda $ map (interpreter . Text) blocks
  where
 
-    parseModule' = parseModuleWithMode (defaultParseMode {fixities = []})
+    parseModule' = parseModuleWithMode defaultParseMode
 
     preprocess (c:'>':' ':l) | c `elem` commandList
         = ["~~~~~ {." ++ [c] ++ "}", dropWhile (==' ') l, "~~~~~", ""]
@@ -153,7 +153,7 @@ processAgdaLines isExercise l_ = do
 processHaskellLines :: Bool -> String -> IO ([String], [String], [Name])
 processHaskellLines isExercise l_ = return (concatMap fst visible, concatMap fst hidden, names)
  where
-    x = zip l $ map (parseDeclWithMode (defaultParseMode {fixities = []})  . unlines) l
+    x = zip l $ map (parseDeclWithMode defaultParseMode . unlines) l
 
     l = parts l_
 

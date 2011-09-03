@@ -15,7 +15,7 @@ import Language.Haskell.Exts.Extension
 
 specialize :: String -> Either String (String, String)
 specialize a
-    = case parseTypeWithMode (defaultParseMode {extensions = [FlexibleContexts], fixities = []}) a of
+    = case parseTypeWithMode (defaultParseMode {extensions = [FlexibleContexts]}) a of
         ParseFailed loc s -> Left $ show s
         ParseOk t -> let
 

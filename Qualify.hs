@@ -20,7 +20,7 @@ qualify
     -> [String] -- ^ names to qualifiy
     -> String   -- ^ Haskell expression
     -> Either String String     -- ^ either the modified expression or an error
-qualify q ns x = case parseExpWithMode (defaultParseMode {fixities = []}) x of
+qualify q ns x = case parseExpWithMode defaultParseMode x of
     ParseOk y -> Right $ prettyPrint $ runReader (trExp y) ns
     e         -> Left $ show e
  where 

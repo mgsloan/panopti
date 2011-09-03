@@ -58,7 +58,7 @@ startGHCiServer paths{-searchpaths-} logError logMsg = do
                 reset
                 set [searchPath := paths]
                 loadModules [fn]
-                setTopLevelModules ["Main"]
+                setTopLevelModules [fn]
 
             x <- m
             return (True, Right x)
