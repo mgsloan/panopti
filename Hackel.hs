@@ -237,7 +237,6 @@ drawApps pos txt c apps = do
           pl = ps' `at` 0 ^+^ (4, 0)
           pm = ps' `at` 0.5
           pr = ps' `at` 1 ^+^ (-4, 0)
-     C.liftIO $ print (fivl, pivl, height)
       maybe (setColor ((0,0,0) :: DColor)) setColor (M.lookup t tc)
       move $ f ^+^ (3,0)
       C.arc (fst f) (snd f) 3 0 (2 * pi)
