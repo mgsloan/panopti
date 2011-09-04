@@ -9,6 +9,7 @@ import Control.Concurrent.MVar
 import Control.Monad (liftM, zipWithM, zipWithM_, foldM, foldM_, join, when)
 import qualified Control.Monad.State as ST
 import Control.Monad.Trans (liftIO)
+import Data.Char (isSpace)
 import Data.Colour.SRGB (channelRed, channelGreen, channelBlue, toSRGB24)
 import qualified Data.Colour.Names as Color
 import Data.Curve hiding ((<.>))
@@ -34,6 +35,22 @@ import System.FilePath ((</>), (<.>))
 import System.IO (writeFile)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
+
+{- Things to work on
+
+ 1) Arity depiction
+ 2) Type specialization / contextual monomorphism
+ 3) Parse identifier errors
+ 4) Parse type errors
+ 5) Application structure manipulation
+ 6) User input of parameter-example table
+ 7) Depiction of concrete value flow
+ 8) Handle full source files
+ 9) Live update of running haskell program
+ 10) Detection of untenable type classes
+ 11) Contextual Hoogle / paste buffers
+
+ -}
 
 data State = State
   { _code :: String
@@ -124,15 +141,15 @@ spanLine :: String -> Ivl -> C.Render DLine
 spanLine txt (f, t) = liftM (mapT reverseLinear . rside 2 . expandR 2) 
                     $ textRect txt (f - 1) (t - 1)
 
-srcSpan :: SrcSpanInfo -> Ivl
-srcSpan = (srcSpanStartColumn &&& srcSpanEndColumn) .  srcInfoSpan
+colSpan :: SrcSpan -> Ivl
+colSpan = (srcSpanStartColumn &&& srcSpanEndColumn)
 
-getSpan :: (Data a) => a -> Maybe Ivl
+getSpan :: (Data a) => a -> Maybe SrcSpan
 getSpan = listToMaybe . catMaybes
-        . gmapQ (const Nothing `extQ` (Just . srcSpan))
+        . gmapQ (const Nothing `extQ` (Just . srcInfoSpan))
 
 getSpan' :: (Data a) => a -> Ivl
-getSpan' = fromJust . getSpan
+getSpan' = colSpan . fromJust . getSpan
 
 debug x = trace (show x) x
 
@@ -183,6 +200,11 @@ eitherToMaybe = either (const Nothing) Just
 isRight (Right _) = True
 isRight _ = False
 
+trim = f . f
+ where f = reverse . dropWhile isSpace
+
+ivlHull (f1, t1) (f2, t2) = (min f1 f2, max t1 t2)
+
 type TypeMap = M.Map Ivl (Type SrcSpanInfo)
 type ColorMap = M.Map (Type SrcSpanInfo) (Int, Int, Int)
 type HeightMap = IM.IntervalMap Int Double
@@ -217,39 +239,47 @@ drawApps pos txt c apps = do
   drawLegend :: ColorMap -> C.Render ()
   drawLegend = zipWithM_ (\y (t, c) -> do
       setColor c
-      relText 0 (fst pos, y) (prettyPrint t))
+      relText 0 (fst pos, y) (trim $ prettyPrint t))
     [220, 240..] . M.toList
   drawFunc :: TypeMap -> ColorMap -> HeightMap -> (Ivl, [Ivl]) -> C.Render HeightMap
   drawFunc tm tc hm (func, params) = do
     fspan <- spanLine txt func
+    let pts = liftM (drop (length params + 1) . splitType) $ M.lookup func tm
     foldM (drawParam fspan) hm 
-        . catMaybes
-        . map (\r -> liftM (func, r,) $ M.lookup r tm)
+        . (++ map (\t -> (func, Nothing, Just t)) (maybe [] id pts))
+        . map (\r -> (func, Just r,) $ M.lookup r tm)
         $ reverse params
    where
-    drawParam :: DLine -> HeightMap -> (Ivl, Ivl, Type SrcSpanInfo) -> C.Render HeightMap
-    drawParam fs hm (fivl, pivl, t) = do
-      ps <- spanLine txt pivl
-      let height = getHeight pos (snd fivl, snd pivl) hm
-          fs' = offset (fst pos, height) fs
-          ps' = offset (fst pos, height) ps
-          f = fs' `at` 1 ^-^ (5, 0)
-          pl = ps' `at` 0 ^+^ (4, 0)
-          pm = ps' `at` 0.5
-          pr = ps' `at` 1 ^+^ (-4, 0)
-      maybe (setColor ((0,0,0) :: DColor)) setColor (M.lookup t tc)
+    drawParam :: DLine -> HeightMap -> (Ivl, Maybe Ivl, Maybe (Type SrcSpanInfo)) 
+              -> C.Render HeightMap
+    drawParam fs hm (fivl, pivl', t) = do
+      maybe (setColor ((0,0,0) :: DColor)) setColor (t >>= (`M.lookup` tc))
       move $ f ^+^ (3,0)
       C.arc (fst f) (snd f) 3 0 (2 * pi)
       C.fill
-      if ' ' `elem` substr pivl txt then do
-        draw $ bezierFromPoints [f, pr]
-        draw $ bezierFromPoints [f, pl]
-        draw $ bezierFromPoints [pl, pl ^+^ (0, 4)]
-        draw $ bezierFromPoints [pr, pr ^+^ (0, 4)]
-       else do
-        draw $ bezierFromPoints [f, pm]
-      C.stroke
-      return $ IM.insert (uncurry IM.Interval $ pivl) (height - 10) hm
+
+      whenJust pivl' (\pivl -> do
+        ps <- spanLine txt pivl
+        let ps' = offset (fst pos, height) ps
+            pl = ps' `at` 0 ^+^ (4, 0)
+            pm = ps' `at` 0.5
+            pr = ps' `at` 1 ^+^ (-4, 0)
+        if ' ' `elem` substr pivl txt then do
+          draw $ bezierFromPoints [f, pr]
+          draw $ bezierFromPoints [f, pl]
+          draw $ bezierFromPoints [pl, pl ^+^ (0, 4)]
+          draw $ bezierFromPoints [pr, pr ^+^ (0, 4)]
+        else do
+          draw $ bezierFromPoints [f, pm]
+        C.stroke)
+
+      return $ IM.insert (uncurry IM.Interval $ ivl) (height - 10) hm
+     where
+      height = getHeight pos (snd fivl, maybe (snd fivl) snd pivl') hm
+      ivl = maybe (snd fivl, snd fivl) (ivlHull fivl) pivl'
+      fs' = offset (fst pos, height) fs
+      f = fs' `at` 1 ^-^ (5, 0)
+      
 
 colours :: [(Int, Int, Int)]
 colours = cycle . map (\c -> (fromIntegral $ channelRed c, 
@@ -269,11 +299,11 @@ colours = cycle . map (\c -> (fromIntegral $ channelRed c,
 whenJust :: Monad m => Maybe a -> (a -> m ()) -> m ()
 whenJust mg f = maybe (return ()) f mg
 
-type STT = ST.State (String, M.Map String Char)
+-- | Conditionally run an action, and yield result.
+maybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
+maybeM f = maybe (return Nothing) (liftM Just . f)
 
-floatFst (f, s) = pure (,s) <*> f
-floatSnd (f, s) = pure (f,) <*> s
-floatBoth (f, s)  = liftA2 (,) (pure f) (pure s)
+type STT = ST.State (String, M.Map String Char)
 
 cannonicalType :: Type SrcSpanInfo -> Type SrcSpanInfo
 cannonicalType t = ST.evalState (rec t) (['a'..], M.empty)
@@ -298,8 +328,8 @@ cannonicalType t = ST.evalState (rec t) (['a'..], M.empty)
 
   doType :: Type SrcSpanInfo -> STT (Type SrcSpanInfo)
   doType (TyForall l bnds ctx t) = do
-    bs <- maybe (return Nothing) (liftM Just . mapM doBind) bnds
-    cx <- maybe (return Nothing) (liftM Just . rec) ctx
+    bs <- maybeM (mapM doBind) bnds
+    cx <- maybeM rec ctx
     t' <- rec t
     whenJust bs $ mapM_ (removeVar . fst)
     return $ TyForall l (liftM (map snd) bs) cx t'
@@ -313,3 +343,33 @@ cannonicalType t = ST.evalState (rec t) (['a'..], M.empty)
    `extM` (\n -> doName n >>= return . snd)
    `extM` preserveQ
    `extM` doType
+
+splitType ty = case ty of
+    (TyForall l bnds (Just ctx) t) -> rec t . map (\a -> (vars a, a)) $ fromContext ctx
+    t -> rec t []
+ where
+  rec (TyFun l a b) as = toForall a as : rec b as
+  rec t as = [toForall t as]
+
+  toForall t [] = t
+  toForall t as = TyForall l Nothing 
+    (Just . toContext l . map snd $ filter (overlaps $ vars t) as) t
+   where l = noInfoSpan . fromJust $ getSpan t
+
+  overlaps xs (ys, _) = any (`elem` ys) xs
+
+  vars :: (Data a) => a -> [String]
+  vars = (concat . gmapQ vars) `extQ` getVar
+
+  getVar :: Name SrcSpanInfo -> [String]
+  getVar (Ident _ n) = [n]
+  getVar (Symbol _ n) = [n]
+
+  fromContext (CxSingle l a) = [a]
+  fromContext (CxTuple l as) = as
+  fromContext (CxParen l c) = fromContext c
+  fromContext _ = []
+
+  toContext l [] = CxEmpty l
+  toContext l [a] = CxSingle l a
+  toContext l as = CxTuple l as
