@@ -20,6 +20,7 @@ import Data.Function (on)
 import Data.Generics.Aliases
 import Data.Hashable
 import Data.IntervalMap.FingerTree as IM
+import Data.IORef
 import Data.Label
 import Data.List (groupBy, sortBy, sort, nub)
 import qualified Data.Map as M
@@ -32,32 +33,38 @@ import Language.Haskell.Exts.Annotated
 import Language.Haskell.Meta.Parse (parseResultToEither)
 import qualified Language.Haskell.Interpreter as I
 import System.FilePath ((</>), (<.>))
+import qualified System.Glib.MainLoop as G
 import System.IO (writeFile)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 
 {- Things to work on
 
- 1) Arity depiction
- 2) Type specialization / contextual monomorphism
- 3) Parse identifier errors
- 4) Parse type errors
- 5) Application structure manipulation
- 6) User input of parameter-example table
- 7) Depiction of concrete value flow
- 8) Handle full source files
- 9) Live update of running haskell program
- 10) Detection of untenable type classes
- 11) Contextual Hoogle / paste buffers
+ * Parse identifier errors
+ * Parse type errors
+ * Application structure manipulation
+ * User input of parameter-example table
+ * Depiction of concrete value flow
+ * Handle full source files
+ * Live update of running haskell program
+ * Detection of untenable type classes
+ * Contextual Hoogle / paste buffers
 
  -}
+
+type Ivl = (Int, Int) 
+type Apps = [(Ivl, [Ivl])]
+type TypeMap = M.Map Ivl (Type SrcSpanInfo)
+type ColorMap = M.Map String (Int, Int, Int)
 
 data State = State
   { _code :: String
   , _cursor :: Int
-  , _parsed :: (ParseResult (Decl SrcSpanInfo))
+  , _parsed :: Maybe (String, Apps, TypeMap, ColorMap)
   , _chan :: TaskChan
   , _mouseCursor :: (Double, Double)
+  , _timeout :: G.HandlerId
+  , _selfRef :: IORef (KeyTable, State)
   }
 
 $(mkLabels [''State])
@@ -71,29 +78,62 @@ setM l x = return . set l x
 lensed :: (f :-> a) -> (f :-> a') -> (a -> a') -> f -> f
 lensed l l' f s = set l' (f $ get l s) s
 
-updateParse :: State -> State
-updateParse = lensed code parsed parseDecl
+modifyIORefM :: IORef a -> (a -> IO a) -> IO ()
+modifyIORefM r f = readIORef r >>= f >>= writeIORef r
+
+firstM f = (\(x, y) -> f x >>= \x' -> return (x', y))
+secondM f = (\(x, y) -> f y >>= \y' -> return (x, y'))
+
+updateParse :: TaskChan -> State -> IO State
+updateParse c s = case parseDecl txt of
+  ParseOk decl -> do
+    let apps = concatApps $ getApps decl
+    tm <- getTypeMap txt c apps
+    let tc = M.fromList . (`zip` colours) . nub . sort . map (trim .  prettyPrint)
+           . catMaybes . map (`M.lookup` tm) $ concatMap snd apps
+    setM parsed (Just (txt, apps, tm, tc)) s
+  _ -> setM parsed Nothing s
+ where
+  txt = get code s 
 
 sourceDir = "source"
 
-main = createDirectoryIfMissing False sourceDir
-    >> startGHCiServer [sourceDir] fail print
-    >>= \chan -> runToy $ Toy
-    { initialState = updateParse $ 
-        State "fibs = 0 : 1 : zipWith (+) fibs (tail fibs)" 0 undefined chan (0, 220)
+main = do
+  createDirectoryIfMissing False sourceDir
+  chan <- startGHCiServer [sourceDir] fail print
+  (stateRef, loop) <- runToyState $ Toy
+    { initialState =
+        State "fibs = 0 : 1 : zipWith (+) fibs (tail fibs)" 0 Nothing chan (0, 220) 0 undefined
     , mouse   = const $ setM mouseCursor
     , key     = handleKey
     , display = handleDisplay
     , tick    = const return
     }
+  modifyIORefM stateRef (secondM (setTimeout . set selfRef stateRef))
+  loop
+
+updateTime = 200
+
+setTimeout s = do
+  case get timeout s of
+    0 -> return ()
+    x -> G.timeoutRemove x
+  time <- G.timeoutAdd (handler $ get selfRef s) updateTime
+  return $ set timeout time s
+ where
+  handler ref = do
+    (km, st) <- readIORef ref
+    st' <- updateParse (get chan s) st
+    writeIORef ref (km, st')
+    return False
 
 handleKey :: Bool -> Either [Char] Char -> State -> IO State
-handleKey True (Right k) (State xs ix p c m) =
-  return . updateParse $ State (pre ++ (k : post)) (ix + 1) p c m
+handleKey True (Right k) (State xs ix p c m t s) =
+  setTimeout $ State (pre ++ (k : post)) (ix + 1) p c m t s
  where 
   (pre, post) = splitAt ix xs
 
-handleKey True (Left k) s@(State xs ix _ _ _) = liftM updateParse $ (case k of
+handleKey True (Left k) s@(State xs ix _ c _ _ _) = (case k of
   "Left"  -> modM cursor (max 0 . subtract 1)
   "Right" -> modM cursor (min endPos . (+1))
   "Home"  -> setM cursor 0
@@ -102,7 +142,7 @@ handleKey True (Left k) s@(State xs ix _ _ _) = liftM updateParse $ (case k of
                . set code (delIx (ix - 1))
   "Delete" -> setM code (delIx ix)
   "Escape" -> const $ error "User escape"
-  _ -> return) s
+  _ -> return) s >>= setTimeout
  where
   endPos = length xs
   delIx i | (pre, (_:post)) <- splitAt i xs = pre ++ post
@@ -111,7 +151,7 @@ handleKey True (Left k) s@(State xs ix _ _ _) = liftM updateParse $ (case k of
 handleKey _ _ s = return s
 
 handleDisplay :: IPnt -> IRect -> State -> C.Render State
-handleDisplay _ (tl, br) s@(State txt ix p c (_, ypos)) = do
+handleDisplay _ (tl, br) s@(State txt ix p c (_, ypos) _ _) = do
   let textPos = (50.5, 200.5)
       height = (fromIntegral . snd $ br ^-^ tl) * 0.5
       astPos = textPos ^+^ (0.0, ypos - height)
@@ -126,12 +166,7 @@ handleDisplay _ (tl, br) s@(State txt ix p c (_, ypos)) = do
        =<< textRect txt 0 ix 
   C.stroke
   
-  case p of
-    ParseOk decl -> drawApps (textPos ^-^ (0, 20)) txt c
-                             (concatApps $ getApps decl)
-    f@(ParseFailed _ _) -> C.showText (show f)
-  C.stroke
-
+  whenJust p (\t -> drawApps (textPos ^-^ (0, 20)) c t)
   return s
 
 reverseLinear :: Linear Double -> Linear Double
@@ -153,9 +188,6 @@ getSpan' = colSpan . fromJust . getSpan
 
 debug x = trace (show x) x
 
-type Ivl = (Int, Int) 
-type Apps = [(Ivl, [Ivl])]
-
 getApps :: forall a. (Data a) => a -> Apps
 getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
  where 
@@ -164,7 +196,9 @@ getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
     (QVarOp _ (UnQual _ (Symbol _ "."))) -> [(getSpan' l, [getSpan' r])]
     (QVarOp _ (UnQual _ (Symbol _ "$"))) -> [(getSpan' l, [getSpan' r])]
     _                                    -> [(getSpan' o, [getSpan' l, getSpan' r])]
-  processExp (App _ l r)        = [(getSpan' l, [getSpan' r])]
+  processExp (LeftSection _ l o)  = [(getSpan' o, [getSpan' l])]
+  processExp (RightSection _ o r) = [(getSpan' o, [getSpan' r])] --TODO: uhhh
+  processExp (App _ l r)          = [(getSpan' l, [getSpan' r])]
   processExp _ = []
   recurse :: a -> Apps
   recurse = concat . gmapQ getApps
@@ -195,6 +229,8 @@ combineFstOn f = map (\xs -> (fst $ head xs, map snd xs)) . groupSortOn f
 
 substr (f, t) = take (t - f) . drop (f - 1)
 
+subst (f, t) xs ys = (take (f - 1) ys) ++ xs ++ drop (t - 1) ys
+
 eitherToMaybe = either (const Nothing) Just
 
 isRight (Right _) = True
@@ -205,13 +241,11 @@ trim = f . f
 
 ivlHull (f1, t1) (f2, t2) = (min f1 f2, max t1 t2)
 
-type TypeMap = M.Map Ivl (Type SrcSpanInfo)
-type ColorMap = M.Map (Type SrcSpanInfo) (Int, Int, Int)
 type HeightMap = IM.IntervalMap Int Double
 
 getTypeMap :: String -> TaskChan -> Apps -> IO TypeMap
 getTypeMap txt c apps = do
-  rec <- liftM isRight . getType . recText $ words txt !! 0
+  rec <- liftM isRight . getType . recText1 $ words txt !! 0
   fs <- mapM (getExpr rec . fst) apps
   ps <- mapM (mapM (getExpr rec) . snd) apps
   return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
@@ -220,31 +254,32 @@ getTypeMap txt c apps = do
   getExpr rec ivl
     = liftM (\t -> eitherToMaybe t >>=
         liftM (ivl,) . eitherToMaybe . parseResultToEither . parseType)
-    . getType . (if rec then recText else id) $ "(" ++ substr ivl txt ++ ")"
+    . getType . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
   getType = interpret c "MyMain" . I.typeOf
-  recText x = "let {" ++ txt ++ "} in " ++ x
+  recText1 x = "let {" ++ txt ++ "} in " ++ x
+  recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
 
 getHeight :: (Double, Double) -> Ivl -> IM.IntervalMap Int Double -> Double
 getHeight (_, y) (f, t) = minimum . (y:) . map snd . intersections (IM.Interval f t)
 
-drawApps :: (Double, Double) -> String -> TaskChan -> Apps -> C.Render ()
-drawApps pos txt c apps = do
-    tm <- C.liftIO $ getTypeMap txt c apps
-    let tc = M.fromList . (`zip` colours) . nub . sort
-           . catMaybes . map (`M.lookup` tm) $ concatMap snd apps
+drawApps :: (Double, Double) -> TaskChan 
+         -> (String, Apps, TypeMap, ColorMap)  -> C.Render ()
+drawApps pos c (txt, apps, tm, tc) = do
     drawLegend tc
-    C.setLineWidth 1
     foldM_ (drawFunc tm tc) IM.empty $ reverse apps
  where
   drawLegend :: ColorMap -> C.Render ()
   drawLegend = zipWithM_ (\y (t, c) -> do
       setColor c
-      relText 0 (fst pos, y) (trim $ prettyPrint t))
+      relText 0 (fst pos, y) t)
     [220, 240..] . M.toList
   drawFunc :: TypeMap -> ColorMap -> HeightMap -> (Ivl, [Ivl]) -> C.Render HeightMap
   drawFunc tm tc hm (func, params) = do
     fspan <- spanLine txt func
-    let pts = liftM (drop (length params + 1) . splitType) $ M.lookup func tm
+    foldM (\h -> drawFunc tm tc h . (, [])) hm 
+          $ filter (not . (`elem` (map fst apps))) params
+    let pts = liftM (map cannonicalType . drop (length params + 1) . splitFunc)
+            $ M.lookup func tm
     foldM (drawParam fspan) hm 
         . (++ map (\t -> (func, Nothing, Just t)) (maybe [] id pts))
         . map (\r -> (func, Just r,) $ M.lookup r tm)
@@ -253,25 +288,31 @@ drawApps pos txt c apps = do
     drawParam :: DLine -> HeightMap -> (Ivl, Maybe Ivl, Maybe (Type SrcSpanInfo)) 
               -> C.Render HeightMap
     drawParam fs hm (fivl, pivl', t) = do
-      maybe (setColor ((0,0,0) :: DColor)) setColor (t >>= (`M.lookup` tc))
+      maybe (setColor ((0,0,0) :: DColor)) setColor 
+            (t >>= (`M.lookup` tc) . trim . prettyPrint)
       move $ f ^+^ (3,0)
       C.arc (fst f) (snd f) 3 0 (2 * pi)
-      C.fill
 
-      whenJust pivl' (\pivl -> do
-        ps <- spanLine txt pivl
-        let ps' = offset (fst pos, height) ps
-            pl = ps' `at` 0 ^+^ (4, 0)
-            pm = ps' `at` 0.5
-            pr = ps' `at` 1 ^+^ (-4, 0)
-        if ' ' `elem` substr pivl txt then do
-          draw $ bezierFromPoints [f, pr]
-          draw $ bezierFromPoints [f, pl]
-          draw $ bezierFromPoints [pl, pl ^+^ (0, 4)]
-          draw $ bezierFromPoints [pr, pr ^+^ (0, 4)]
-        else do
-          draw $ bezierFromPoints [f, pm]
-        C.stroke)
+      case pivl' of
+        Just pivl -> do
+          C.fill
+          C.setLineWidth 1
+          ps <- spanLine txt pivl
+          let ps' = offset (fst pos, height) ps
+              pl = ps' `at` 0 ^+^ (4, 0)
+              pm = ps' `at` 0.5
+              pr = ps' `at` 1 ^+^ (-4, 0)
+          if ' ' `elem` substr pivl txt then do
+            draw $ bezierFromPoints [f, pr]
+            draw $ bezierFromPoints [f, pl]
+            draw $ bezierFromPoints [pl, pl ^+^ (0, 4)]
+            draw $ bezierFromPoints [pr, pr ^+^ (0, 4)]
+          else do
+            draw $ bezierFromPoints [f, pm]
+          C.stroke
+        Nothing -> do
+          C.setLineWidth 2
+          C.stroke
 
       return $ IM.insert (uncurry IM.Interval $ ivl) (height - 10) hm
      where
@@ -280,7 +321,6 @@ drawApps pos txt c apps = do
       fs' = offset (fst pos, height) fs
       f = fs' `at` 1 ^-^ (5, 0)
       
-
 colours :: [(Int, Int, Int)]
 colours = cycle . map (\c -> (fromIntegral $ channelRed c, 
                               fromIntegral $ channelGreen c,
@@ -344,7 +384,7 @@ cannonicalType t = ST.evalState (rec t) (['a'..], M.empty)
    `extM` preserveQ
    `extM` doType
 
-splitType ty = case ty of
+splitFunc ty = case ty of
     (TyForall l bnds (Just ctx) t) -> rec t . map (\a -> (vars a, a)) $ fromContext ctx
     t -> rec t []
  where
