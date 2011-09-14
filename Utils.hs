@@ -115,9 +115,16 @@ getSpan = listToMaybe . catMaybes
 getSpan' :: (Data a) => a -> Ivl
 getSpan' = colSpan . fromJust . getSpan
 
-lexRec = runL (Lex lexer) (\x -> case unLoc x of
-    EOF -> return []
-    x -> liftM (show x:) lexRec)
+spanContains :: SrcSpan -> SrcLoc -> Bool 
+spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c) =
+  f == f' && (if sl == l then sc <= c else sl < l)
+          && (if el == l then ec >= c else el > l)
+
+lexify = runParser lexRec 
+ where
+  lexRec = runL (Lex lexer) (\x -> case unLoc x of
+      EOF -> return []
+      _ -> liftM (x:) lexRec)
 
 -- Taken from Language.Haskell.Meta.Parse
 parseResultToEither :: ParseResult a -> Either String a
