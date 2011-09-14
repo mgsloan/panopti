@@ -174,6 +174,7 @@ cannonicalType t = ST.evalState (rec t) (['a'..], M.empty)
    `extM` preserveQ
    `extM` doType
 
+splitFunc :: Type SrcSpanInfo -> [Type SrcSpanInfo]
 splitFunc ty = case ty of
     (TyForall l bnds (Just ctx) t) -> rec t . map (\a -> (vars a, a)) $ fromContext ctx
     t -> rec t []

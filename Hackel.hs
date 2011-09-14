@@ -67,58 +67,6 @@ data State = State
 
 $(mkLabels [''State])
 
-updateParse :: TaskChan -> State -> IO State
-updateParse c s = (parsed' $ partialParse parseDecl txt) >>= flip (setM parsed) s
- where
-  txt = get code s 
-  parsed' (Just (decl, gaps)) = do
-    let apps = concatApps $ getApps decl
-    tm <- getTypeMap txt c apps
-    let tc = M.fromList . (`zip` colours) . onub . sort . map (trim .  prettyPrint)
-           . catMaybes . map (`M.lookup` tm) $ concatMap snd apps
-        gaps' = mergeGaps txt gaps
-    print gaps
-    print gaps'
-    return (Just $ Results txt apps tm tc gaps' (imGaps gaps'))
-  parsed' Nothing = return Nothing
-
-preferOk = eitherToMaybe . parseResultToEither
-
-imFromList :: (Ord a) => [(IM.Interval a, b)] -> IM.IntervalMap a b
-imFromList = foldl (\m p -> (uncurry IM.insert) p m) IM.empty
-
-imGaps :: [Ivl] -> IM.IntervalMap Int Int
-imGaps ivls = imFromList
-  $ zip (zipWith (\(_,f) (t,_) -> IM.Interval f t) ivls' $ tail ivls')
-        (map (foldT subtract) ivls')
- where
-  ivls' = (0, 0) : ivls
-
-mergeGaps :: String -> [Ivl] -> [Ivl]
-mergeGaps txt = foldl merger [] . sort
- where
-  merger [] x = [x]
-  merger ((f, t):xs) (f', t') = if all isSpace (substr (t, f') txt)
-                                then (f, t'):xs
-                                else (f', t'):(f, t):xs
-
-partialParse :: (String -> ParseResult a) -> String -> Maybe (a, [Ivl])
-partialParse f txt = case f (debug txt) of
-  ParseOk decl -> Just (decl, [])
-  ParseFailed l err ->
-    case (lexify txt) of
-      ParseOk xs -> case findIndex ((`spanContains` l) . loc) xs of
-        Just ix -> attemptPartials xs ix
-        Nothing -> Nothing
-      ParseFailed l err -> trace err Nothing
- where
-  attemptPartials xs ix =
-    msum $ map (\i -> liftM (second (i:)) . partialParse f $ subst i "" txt) ivls
-   where
-    ivls = [ (fr, to) 
-           | fr <- map (srcSpanStartColumn . loc . (xs !!)) [ix, ix - 1..0]
-           , to <- map (srcSpanEndColumn   . loc . (xs !!)) [ix..length xs - 1]]
-    
 -- TODO: static import considerations
 sourceDir = "source"
 
@@ -205,42 +153,7 @@ spanLine :: String -> Ivl -> C.Render DLine
 spanLine txt (f, t) = liftM (mapT reverseLinear . rside 2 . expandR 2) 
                     $ textRect txt (f - 1) (t - 1)
 
-getApps :: forall a. (Data a) => a -> Apps
-getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
- where 
-  processExp :: Exp SrcSpanInfo -> Apps
-  processExp (InfixApp _ l o r) = case o of
-    (QVarOp _ (UnQual _ (Symbol _ "."))) -> [(getSpan' l, [getSpan' r])]
-    (QVarOp _ (UnQual _ (Symbol _ "$"))) -> [(getSpan' l, [getSpan' r])]
-    _                                    -> [(getSpan' o, [getSpan' l, getSpan' r])]
-  processExp (LeftSection _ l o)  = [(getSpan' o, [getSpan' l])]
-  processExp (RightSection _ o r) = [(getSpan' o, [getSpan' r])] --TODO: uhhh
-  processExp (App _ l r)          = [(getSpan' l, [getSpan' r])]
-  processExp _ = []
-  recurse :: a -> Apps
-  recurse = concat . gmapQ getApps
-
--- Takes a list of apps, and merges by left-hand-span, and therefore app lhs.
-concatApps = map (second $ reverse . concat)
-           . combineFstOn (\((x, _), _) -> x)
-           . reverse
-
 type HeightMap = IM.IntervalMap Int Double
-
-getTypeMap :: String -> TaskChan -> Apps -> IO TypeMap
-getTypeMap txt c apps = do
-  rec <- liftM isRight . getType . recText1 $ words txt !! 0
-  fs <- mapM (getExpr rec . fst) apps
-  ps <- mapM (mapM (getExpr rec) . snd) apps
-  return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
- where
-  getExpr :: Bool -> Ivl -> IO (Maybe (Ivl, Type SrcSpanInfo))
-  getExpr rec ivl
-    = liftM (\t -> eitherToMaybe t >>= liftM (ivl,) . preferOk . parseType)
-    . getType . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
-  getType = interpret c "MyMain" . I.typeOf
-  recText1 x = "let {" ++ txt ++ "} in " ++ x
-  recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
 
 getHeight :: (Double, Double) -> Ivl -> IM.IntervalMap Int Double -> Double
 getHeight (_, y) (f, t) = minimum . (y:) . map snd . intersections (IM.Interval f t)
@@ -308,6 +221,99 @@ drawApps pos c (Results txt apps tm tc gs gm) = do
       fs' = offset (fst pos, height) fs
       f = fs' `at` 1 ^-^ (5, 0)
       
+
+
+updateParse :: TaskChan -> State -> IO State
+updateParse c s = (parsed' $ partialParse parseDecl txt) >>= flip (setM parsed) s
+ where
+  txt = get code s 
+  parsed' (Just (decl, gaps)) = do
+    let apps = concatApps $ getApps decl
+    tm <- getTypeMap txt c apps
+    let tc = getColorMap tm apps
+        gaps' = mergeGaps txt gaps
+    return (Just $ Results txt apps tm tc gaps' (imGaps gaps'))
+  parsed' Nothing = return Nothing
+
+
+partialParse :: (String -> ParseResult a) -> String -> Maybe (a, [Ivl])
+partialParse f txt = case f (debug txt) of
+  ParseOk decl -> Just (decl, [])
+  ParseFailed l err ->
+    case (lexify txt) of
+      ParseOk xs -> case findIndex ((`spanContains` l) . loc) xs of
+        Just ix -> attemptPartials xs ix
+        Nothing -> Nothing
+      ParseFailed l err -> trace err Nothing
+ where
+  attemptPartials xs ix =
+    msum $ map (\i -> liftM (second (i:)) . partialParse f $ subst i "" txt) ivls
+   where
+    ivls = [ (fr, to)
+           | fr <- map (srcSpanStartColumn . loc . (xs !!)) [ix, ix - 1..0]
+           , to <- map (srcSpanEndColumn   . loc . (xs !!)) [ix..length xs - 1]]
+
+imFromList :: (Ord a) => [(IM.Interval a, b)] -> IM.IntervalMap a b
+imFromList = foldl (\m p -> (uncurry IM.insert) p m) IM.empty
+
+imGaps :: [Ivl] -> IM.IntervalMap Int Int
+imGaps ivls = imFromList
+  $ zip (zipWith (\(_,f) (t,_) -> IM.Interval f t) ivls' $ tail ivls')
+        (map (foldT subtract) ivls')
+ where
+  ivls' = (0, 0) : ivls
+
+mergeGaps :: String -> [Ivl] -> [Ivl]
+mergeGaps txt = foldl merger [] . sort
+ where
+  merger [] x = [x]
+  merger ((f, t):xs) (f', t') = if all isSpace (substr (t, f') txt)
+                                then (f, t'):xs
+                                else (f', t'):(f, t):xs
+
+
+getApps :: forall a. (Data a) => a -> Apps
+getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
+ where 
+  processExp :: Exp SrcSpanInfo -> Apps
+  processExp (InfixApp _ l o r) = case o of
+    (QVarOp _ (UnQual _ (Symbol _ "."))) -> [(getSpan' l, [getSpan' r])]
+    (QVarOp _ (UnQual _ (Symbol _ "$"))) -> [(getSpan' l, [getSpan' r])]
+    _                                    -> [(getSpan' o, [getSpan' l, getSpan' r])]
+  processExp (LeftSection _ l o)  = [(getSpan' o, [getSpan' l])]
+  processExp (RightSection _ o r) = [(getSpan' o, [getSpan' r])] --TODO: uhhh
+  processExp (App _ l r)          = [(getSpan' l, [getSpan' r])]
+  processExp _ = []
+  recurse :: a -> Apps
+  recurse = concat . gmapQ getApps
+
+-- Takes a list of apps, and merges by left-hand-span, and therefore app lhs.
+concatApps = map (second $ reverse . concat)
+           . combineFstOn (\((x, _), _) -> x)
+           . reverse
+
+
+preferOk = eitherToMaybe . parseResultToEither
+
+getTypeMap :: String -> TaskChan -> Apps -> IO TypeMap
+getTypeMap txt c apps = do
+  rec <- liftM isRight . getType . recText1 $ words txt !! 0
+  fs <- mapM (getExpr rec . fst) apps
+  ps <- mapM (mapM (getExpr rec) . snd) apps
+  return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
+ where
+  getExpr :: Bool -> Ivl -> IO (Maybe (Ivl, Type SrcSpanInfo))
+  getExpr rec ivl
+    = liftM (\t -> eitherToMaybe t >>= liftM (ivl,) . preferOk . parseType)
+    . getType . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
+  getType = interpret c "MyMain" . I.typeOf
+  recText1 x = "let {" ++ txt ++ "} in " ++ x
+  recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
+
+getColorMap :: TypeMap -> Apps -> ColorMap
+getColorMap tm = M.fromList . (`zip` colours)
+               . onub . sort . map (trim . prettyPrint)
+               . catMaybes . map (`M.lookup` tm) . concatMap snd
 
 colours :: [(Int, Int, Int)]
 colours = cycle . map (\c -> (fromIntegral $ channelRed c, 
