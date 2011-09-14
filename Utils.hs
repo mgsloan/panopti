@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances, TemplateHaskell, TupleSections, TypeOperators,
 ScopedTypeVariables, TypeFamilies, ParallelListComp, NoMonomorphismRestriction #-}
 
-module HaskellUtils where
+module Utils where
 
 -- import Control.Applicative (liftA2, pure, (<*>))
 
@@ -14,7 +14,7 @@ import Data.Data
 import Data.Function (on)
 import Data.IORef
 import Data.Label
-import Data.List (groupBy, sortBy, sort, nub, findIndex, nubBy)
+import Data.List (groupBy, sortBy, findIndex)
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)

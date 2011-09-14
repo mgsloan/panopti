@@ -5,34 +5,25 @@ import Simple
 import Utils
 
 import Control.Arrow (second)
-import Control.Concurrent.MVar
-import Control.Monad (liftM, zipWithM, zipWithM_, foldM, foldM_, join, when)
-import Control.Monad.Trans (liftIO)
-import Data.Char (isSpace)
+import Control.Monad (liftM, zipWithM_, foldM, foldM_)
 import Data.Colour.SRGB (channelRed, channelGreen, channelBlue, toSRGB24)
 import qualified Data.Colour.Names as Color
 import Data.Curve hiding ((<.>))
 import Data.Curve.Util (mapT)
 import Data.Data
-import Data.Either
 import Data.Generics.Aliases
-import Data.Hashable
 import Data.IntervalMap.FingerTree as IM
 import Data.IORef
 import Data.Label
-import Data.List (groupBy, sortBy, sort, nub, findIndex, nubBy)
+import Data.List (sort)
 import Data.Maybe
 import qualified Data.Map as M
-import Debug.Trace
 import Graphics.ToyFramework
 import qualified Graphics.Rendering.Cairo as C
 import Language.Haskell.Exts.Annotated
 import qualified Language.Haskell.Interpreter as I
-import System.FilePath ((</>), (<.>))
 import qualified System.Glib.MainLoop as G
-import System.IO (writeFile)
-import System.IO.Unsafe (unsafePerformIO)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing)
 
 {- Things to work on
 
@@ -72,7 +63,7 @@ updateParse c s = case parseDecl txt of
     let tc = M.fromList . (`zip` colours) . onub . sort . map (trim .  prettyPrint)
            . catMaybes . map (`M.lookup` tm) $ concatMap snd apps
     setM parsed (Just (txt, apps, tm, tc)) s
-  x -> setM parsed Nothing (trace (show x) s)
+  x -> setM parsed Nothing s
  where
   txt = get code s 
 
@@ -82,6 +73,7 @@ partialParse = case parseDecl txt of
   ParseOk decl -> do
 -}
 
+-- TODO: static import considerations
 sourceDir = "source"
 
 main = do
@@ -166,8 +158,6 @@ reverseLinear = (`compose` (Linear 1 0 :: Linear Double))
 spanLine :: String -> Ivl -> C.Render DLine
 spanLine txt (f, t) = liftM (mapT reverseLinear . rside 2 . expandR 2) 
                     $ textRect txt (f - 1) (t - 1)
-
-debug x = trace (show x) x
 
 getApps :: forall a. (Data a) => a -> Apps
 getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
