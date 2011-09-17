@@ -1,20 +1,21 @@
 {-# LANGUAGE FlexibleInstances, TemplateHaskell, TupleSections, TypeOperators,
-ScopedTypeVariables, TypeFamilies, ParallelListComp, NoMonomorphismRestriction #-}
+TypeFamilies, ParallelListComp, NoMonomorphismRestriction #-}
 
 module Utils where
 
 -- import Control.Applicative (liftA2, pure, (<*>))
 
-import Control.Arrow ((&&&), second)
+import Control.Arrow ((***), (&&&), second)
 import Control.Concurrent.MVar
-import Control.Monad (liftM)
+import Control.Monad (liftM, msum)
 import qualified Control.Monad.State as ST
 import Data.Char (isSpace)
 import Data.Data
 import Data.Function (on)
+import Data.Generics.Text (gshow)
 import Data.IORef
 import Data.Label
-import Data.List (groupBy, sortBy, findIndex)
+import Data.List (sort, groupBy, sortBy, findIndex)
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
@@ -37,14 +38,27 @@ setM l x = return . set l x
 lensed :: (f :-> a) -> (f :-> a') -> (a -> a') -> f -> f
 lensed l l' f s = set l' (f $ get l s) s
 
+maybeLens :: Maybe a :-> a
+maybeLens = lens (fromJust) (\v _ -> Just v)
+
 modifyIORefM :: IORef a -> (a -> IO a) -> IO ()
 modifyIORefM r f = readIORef r >>= f >>= writeIORef r
 
 firstM f = (\(x, y) -> f x >>= \x' -> return (x', y))
 secondM f = (\(x, y) -> f y >>= \y' -> return (x, y'))
 
+liftFst (x, y) = y >>= return . (x,)
+liftSnd (x, y) = x >>= return . (,y)
+
+pairGroupBy :: (a -> a -> Bool) -> [a] -> [[a]]
+pairGroupBy f [] = []
+pairGroupBy f (x:xs) = helper . ((True, x):) $ zipWith (\a b -> (f a b, b)) xs (tail xs)
+  where helper [] = []
+        helper (x:xs) = (map snd (x:pre)) : helper post
+          where (pre, post) = span fst xs
+
 onub = onubBy (==)
-onubBy f = map head . groupBy f
+onubBy f = map head . pairGroupBy f
 
 debug x = trace (show x) x
 
@@ -75,11 +89,12 @@ groupSortOn f = groupBy ((==) `on` f) . sortBy (comparing f)
 -- Eliminate redundant fst, concatenate together snds.
 combineFstOn f = map (\xs -> (fst $ head xs, map snd xs)) . groupSortOn f
 
-substr (f, t) = take (t - f) . drop (f - 1)
+substr (f, t) = take (t - f) . drop f
 
-subst (f, t) xs ys = (take (f - 1) ys) ++ xs ++ drop (t - 1) ys
+subst (f, t) xs ys = (take f ys) ++ xs ++ drop t ys
 
-eitherToMaybe = either (const Nothing) Just
+rightToMaybe = either (const Nothing) Just
+leftToMaybe  = either Just (const Nothing)
 
 isRight (Right _) = True
 isRight _ = False
@@ -106,7 +121,7 @@ ivlHull (f1, t1) (f2, t2) = (min f1 f2, max t1 t2)
 type Ivl = (Int, Int) 
 
 colSpan :: SrcSpan -> Ivl
-colSpan = (srcSpanStartColumn &&& srcSpanEndColumn)
+colSpan = (subtract 1 *** subtract 1) . (srcSpanStartColumn &&& srcSpanEndColumn)
 
 getSpan :: (Data a) => a -> Maybe SrcSpan
 getSpan = listToMaybe . catMaybes
@@ -204,3 +219,61 @@ splitFunc ty = case ty of
   toContext l [] = CxEmpty l
   toContext l [a] = CxSingle l a
   toContext l as = CxTuple l as
+
+getExp :: (Data a) => a -> Maybe ExpS
+getExp = (const Nothing) `extQ` Just
+
+icontains :: Ivl -> Ivl -> Bool
+icontains (f, t) (f', t') = f <= f' && t' <= t
+
+atSpan :: (Data a) => Ivl -> a -> Maybe ExpS
+atSpan s = child `extQ` whenExp
+ where
+  whenExp :: ExpS -> Maybe ExpS
+  whenExp x = maybe (Just x) Just $ child x
+  child :: (Data x) => x -> Maybe ExpS
+  child x = do
+    sp <- getSpan x
+    if colSpan sp `icontains` s
+      then msum $ gmapQ (atSpan s) x
+      else Nothing
+
+{-
+parentOfSpan :: (Data a) => Ivl -> a -> Maybe (ExpS, Int)
+parentOfSpan s = child
+ where
+  rec :: (Data a) => a -> Maybe (Either (ExpS, Int) ExpS)
+  rec = (\x -> trace (gshow x) $ ((liftM Left . child) `extQ` (Just . whenExp)) x)
+  whenExp :: ExpS -> Either (ExpS, Int) ExpS
+  whenExp x = maybe (Right x) Left $ child x
+  child :: (Data a) => a -> Maybe (ExpS, Int)
+  child x = do
+    sp <- getSpan x
+    if trace (show (colSpan sp, s)) $ colSpan sp `icontains` s
+      then listToMaybe . sort . catMaybes . snd
+         $ ST.execState (gmapM process x) ([0..], [])
+      else Nothing
+  process :: (Data a) => a -> ST.State ([Int], [Maybe (ExpS, Int)]) a
+  process x = ST.modify (\((y:ys), xs) -> (ys,
+    case rec x of
+      Just (Right e) -> Just (e, y) : xs
+      Just (Left e) -> Just e : xs
+      Nothing -> Nothing : xs)) >> return x
+-}
+
+type ExpS = Exp SrcSpanInfo
+
+toExpList :: ExpS -> [ExpS]
+toExpList e = e : catMaybes (gmapQ ((const Nothing) `extQ` Just) e)
+
+fromExpList :: [ExpS] -> ExpS
+fromExpList (e:ps) = ST.evalState (gmapM ((return . id) `extM` setParam) e) ps
+ where
+  setParam :: ExpS -> ST.State [ExpS] ExpS
+  setParam _ = do
+    (x:xs) <- ST.get
+    ST.put xs
+    return x
+
+mutateExpList :: ([ExpS] -> [ExpS]) -> ExpS -> ExpS
+mutateExpList f = fromExpList . f . toExpList
