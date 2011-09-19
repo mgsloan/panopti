@@ -6,10 +6,10 @@ import Utils
 
 import Prelude hiding ((.))
 
-import Control.Arrow ((&&&), second)
+import Control.Arrow ((***), (&&&), first, second)
 import Control.Category ((.))
 import Control.Monad (liftM, zipWithM_, foldM, foldM_, msum)
-import Data.Char (isSpace)
+import Data.Char (isSpace, toLower)
 import Data.Colour.SRGB (channelRed, channelGreen, channelBlue, toSRGB24, sRGB24read)
 import qualified Data.Colour.Names as Color
 import Data.Curve hiding ((<.>))
@@ -19,7 +19,7 @@ import Data.Generics.Aliases
 import Data.IntervalMap.FingerTree as IM
 import Data.IORef
 import Data.Label
-import Data.List (sort, findIndex, groupBy, sortBy)
+import Data.List (sort, findIndex, groupBy, maximumBy, sortBy, find)
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
@@ -44,7 +44,7 @@ import System.Directory (createDirectoryIfMissing)
 
  -}
 
-type Apps = [(Ivl, [Ivl])]
+type Apps = [(Ivl, Ivl, [Ivl])]
 type ColorMap = M.Map String (Int, Int, Int)
 type GapMap = IM.IntervalMap Int Int
 type TypeMap = M.Map Ivl (Type SrcSpanInfo)
@@ -72,6 +72,7 @@ data State = State
   , _mouseCursor :: (Double, Double)
   , _timeout :: G.HandlerId
   , _selfRef :: IORef (KeyTable, State)
+  , _pastes :: [(String, Maybe String)]
   }
 
 $(mkLabels [''Results, ''State])
@@ -85,7 +86,7 @@ main = do
   (stateRef, loop) <- runToyState $ Toy
     { initialState =
         State "fibs = 0 : 1 : zipWith (+) fibs (tail fibs)"
-              0 Normal Nothing chan (0, 220) 0 undefined
+              0 Normal Nothing chan (0, 220) 0 undefined []
     , mouse   = const $ setM mouseCursor
     , key     = handleKey
     , display = handleDisplay
@@ -105,50 +106,50 @@ setTimeout s = do
  where
   handler ref = do
     (km, st) <- readIORef ref
-    st' <- update (get chan s) st
+    st' <- update st
     writeIORef ref (km, st')
     return False
 
 keyHeld key = liftM (maybe False (\(a,_,_)->a) . (M.lookup key) . fst)
             . readIORef . get selfRef
 
-controlHeld s = do
-  l <- keyHeld "Control_L" s
-  r <- keyHeld "Control_R" s
+eitherHeld key s = do
+  l <- keyHeld (key ++ "_L") s
+  r <- keyHeld (key ++ "_R") s
   return (l || r)
 
-allIvls :: Apps -> [Ivl]
-allIvls xs = onub . sort $ map fst xs ++ concatMap snd xs
+addPaste :: String -> State -> IO State
+addPaste x s = getType (get chan s) x
+           >>= \t -> return $ modify pastes ((x, rightToMaybe t):) s
 
-selectAST :: Ivl -> State -> IO State
-selectAST ivl st = 
-  case atSpan ivl (get decl r) of
-    (Just e) -> setM user (Selection True) $ set cursor ivl st
-    Nothing -> return st
- where
-  r = get (maybeLens . parsed) st
-
-parentSpan :: Ivl -> Apps -> Maybe (Ivl, Int)
-parentSpan ivl = listToMaybe . catMaybes 
-               . map (secondM $ findIndex (`icontains` ivl))
+getSelection :: State -> String
+getSelection s = substr (get cursor s) (get code s)
 
 --parentOfSpan :: (Data a) => Ivl -> a -> Maybe (ExpS, Int)
 
 handleKey :: Bool -> Either [Char] Char -> State -> IO State
 handleKey True (Left "Escape") _ = error "User escape"
 
-handleKey True (Right k) s@(State xs ix Normal _ _ _ _ _f) = do
-  ctrl <- controlHeld s
+handleKey True (Right 'y') s = update =<< addPaste (getSelection s) s
+handleKey True (Right 'd') s = update =<< addPaste (getSelection s)
+  ( set cursor (fst ivl, fst ivl)
+  . set user Normal
+  $ modify code (subst ivl "") s)
+ where
+  ivl = get cursor s
+
+handleKey True (Right k) s@(State xs ix Normal _ _ _ _ _ _) = do
+  ctrl <- eitherHeld "Control" s
   case (ctrl, k) of
-    (True, ' ') -> selectAST ix s
+    (True, ' ') -> return $ selectAST ix s
     _ -> setTimeout
        . set code (pre ++ (k : post))
        $ set cursor (ix ^+^ 1) s
  where
   (pre, post) = splitAt (fst ix) xs
 
-handleKey True (Left k) s@(State xs _ Normal _ _ _ _ _) = do
-  ctrl <- controlHeld s
+handleKey True (Left k) s@(State xs _ Normal _ _ _ _ _ _) = do
+  ctrl <- eitherHeld "Control" s
   let ix = get curs s
       lr = ((if ctrl then wordIx (-2) ix xs
                      else max 0 $ ix - 1), ix)
@@ -167,16 +168,74 @@ handleKey True (Left k) s@(State xs _ Normal _ _ _ _ _) = do
   curs = lens (fst . get cursor) (\a -> set cursor (a, a))
   endPos = length xs
 
-handleKey True (Right k) s@(State xs _ (Selection _) _ _ _ _ _) =
-  setM user Normal s
---  case k of
---    'h' ->
---    'l' ->
+handleKey True (Right k) s@(State xs ix (Selection _) _ _ _ _ _ _) = do
+  shift <- eitherHeld "Shift" s
+  maybe (return s) (if shift then update else return)
+    (case toLower k of
+      'k' -> liftM (\((ivl, _), _) -> set cursor ivl s) parent
+      'j' -> maySetCursor $ childSpan' (ix, 0)
+      'h' -> parent >>= (\(p, _) -> (if shift then moveIx else mutateIx)
+                                    (wrapped (fst p) . (subtract 1)) p)
+      'l' -> parent >>= (\(p, _) -> (if shift then moveIx else mutateIx)
+                                    (wrapped (fst p) . (+1)) p)
+      _ -> Nothing)
+ where
+  wrapped c = (`mod` (maybe 1 id $ arity c))
+  --TODO: use for parameter introduction
+--  arity x = subtract 1 . length . splitFunc . fromJust
+--          . M.lookup x $ getRes typeMap s
+  arity x = liftM (length . thd3) $ find ((==x).snd3) (getRes appIvls s)
+  maySetCursor = liftM (\ivl -> set cursor ivl s)
+  childSpan' x = childSpan x (getRes appIvls s)
+  mutateIx f p = maySetCursor . childSpan' $ second f p
+  moveIx f p = do
+    from <- childSpan' p
+    to <- childSpan' $ second f p
+    let (f', _, s') = swapIxs from to s
+    return $ set cursor f' s'
+  swapIxs a b
+    | b < a = (\(x, y, xs) -> (y, x, xs)) . swapIxs b a 
+    | otherwise = let b' = mapT ((+ (ivlWidth b - ivlWidth a))) b in
+                ( (id &&& (+ivlWidth a)) $ fst b'
+                , (id &&& (+ivlWidth b)) $ fst a
+                , )
+                . modify code (\xs -> subst b' (substr a xs)
+                                    $ subst a  (substr b xs) xs)
+  parent = do
+    cur@(_, ivl) <- atSpan' ix s
+    par@(ivl', _) <- parentSpan ivl (getRes appIvls s)
+    return (par, cur)
 
 handleKey _ _ s = return s
 
+getRes f = get (f . maybeLens . parsed)
+
+atSpan' :: Ivl -> State -> Maybe (ExpS, Ivl)
+atSpan' ivl = liftM (id &&& getSpan') . atSpan ivl . getRes decl
+
+selectAST :: Ivl -> State -> State
+selectAST ivl st = maybe st ((`selectIt`st) . snd) $ atSpan' ivl st
+ where
+  selectIt c = set user (Selection True) . set cursor c
+
+--  curs' e = liftM fst . parentSpan (getSpan' e) $ get (appIvls . maybeLens . parsed) st
+
+childSpan :: (Ivl, Int) -> Apps -> Maybe Ivl
+childSpan (ivl, ix) as = (`atMay` ix) . reverse . thd3 =<<
+  ( listToMaybe . sortBy (comparing (ivlWidth . snd3))
+  $ filter ((`icontains` ivl) . snd3) as)
+
+parentSpan :: Ivl -> Apps -> Maybe (Ivl, Int)
+parentSpan ivl = fmap snd . listToMaybe . sortBy (comparing fst) . catMaybes . map helper
+ where
+  helper (_, x, xs) = findIndex (`icontains` ivl) xs'
+                  >>= \ix -> return (ivlWidth $ xs' !! ix, (x, ix))
+   where
+    xs' = reverse xs
+
+
 handleDisplay :: IPnt -> IRect -> State -> C.Render State
-handleDisplay _ (tl, br) s@(State txt ix user p c (_, ypos) _ _) = do
+handleDisplay _ (tl, br) s@(State txt ix user p c (_, ypos) _ _ _) = do
   let textPos = (50.5, 200.5)
       height = (fromIntegral . snd $ br ^-^ tl) * 0.5
       astPos = textPos ^+^ (0.0, ypos - height)
@@ -197,12 +256,15 @@ handleDisplay _ (tl, br) s@(State txt ix user p c (_, ypos) _ _) = do
        $ boundPoints [(w * f, a), (w * t, -d)]
   C.fill
   
-  whenJust p (\t -> drawApps (textPos ^-^ (0, 20)) c t)
+  whenJust p (\t -> drawApps (textPos ^-^ (0, 25)) c t)
 
   setColor $ readColor "f6f3e8"
   move textPos
   C.showText txt
   C.fill
+
+  move (50.5, 400.5)
+  mapM (\txt -> C.showText (fst txt) >> C.relMoveTo 0 20) (get pastes s)
 
   return s
 
@@ -251,11 +313,11 @@ drawApps pos c (Results txt ftxt _ apps tm tc es) = do
     C.setFontSize 20
     C.lineTo x y
     C.stroke
-  drawFunc :: TypeMap -> ColorMap -> HeightMap -> (Ivl, [Ivl]) -> C.Render HeightMap
-  drawFunc tm tc hm (func, params) = do
+  drawFunc :: TypeMap -> ColorMap -> HeightMap -> (Ivl, Ivl, [Ivl]) -> C.Render HeightMap
+  drawFunc tm tc hm (func, _, params) = do
     fspan <- spanLine txt func
-    foldM (\h -> drawFunc tm tc h . (, [])) hm 
-          $ filter (not . (`elem` (map fst apps))) params
+    foldM (\h -> drawFunc tm tc h . (, undefined, [])) hm 
+          $ filter (not . (`elem` (map fst3 apps))) params
     let pts = liftM (map cannonicalType . drop (length params + 1) . splitFunc)
             $ M.lookup func tm
     foldM (drawParam fspan) hm 
@@ -298,13 +360,13 @@ drawApps pos c (Results txt ftxt _ apps tm tc es) = do
       f = fs' `at` 1 ^-^ (5, 0)
       
 
-update :: TaskChan -> State -> IO State
-update c s = (parsed' $ partialParse parseDecl txt) >>= flip (setM parsed) s
+update :: State -> IO State
+update s = (parsed' $ partialParse parseDecl txt) >>= flip (setM parsed) s
  where
   txt = get code s 
   parsed' (Just (decl, txt', errs)) = do
     let apps = concatApps $ getApps decl
-    tm <- getTypeMap txt' c apps
+    tm <- getTypeMap txt' (get chan s) apps
 --    mapM (print . (`atSpan` decl)) $ M.keys tm
     let tc = getColorMap tm apps
     return (Just $ Results txt txt' decl apps tm tc errs)
@@ -317,7 +379,7 @@ ivlWidth = foldT subtract
 partialParse :: (String -> ParseResult a) -> String -> Maybe (a, String, Errors)
 partialParse f txt = rec Nothing txt
  where
-  rec prior txt = case f (debug txt) of
+  rec prior txt = case f txt of
     ParseOk decl -> Just (decl, txt, [])
     ParseFailed l err -> trace err $ if (Just l == prior) then Nothing else
       case (lexify txt) of
@@ -336,9 +398,6 @@ partialParse f txt = rec Nothing txt
       
 gapChar = '\x180E'
 
--- Actually unecessary
-deMongol = map (\c -> if c == gapChar then ' ' else c)
-
 imFromList :: (Ord a) => [(IM.Interval a, b)] -> IM.IntervalMap a b
 imFromList = foldl (\m p -> (uncurry IM.insert) p m) IM.empty
 
@@ -347,36 +406,44 @@ getApps :: forall a. (Data a) => a -> Apps
 getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
  where
   processExp :: ExpS -> Apps
-  processExp (InfixApp _ l o r) = case o of
-    (QVarOp _ (UnQual _ (Symbol _ "."))) -> [(getSpan' l, [getSpan' r])]
-    (QVarOp _ (UnQual _ (Symbol _ "$"))) -> [(getSpan' l, [getSpan' r])]
-    _                                    -> [(getSpan' o, [getSpan' l, getSpan' r])]
-  processExp (LeftSection _ l o)  = [(getSpan' o, [getSpan' l])]
-  processExp (RightSection _ o r) = [(getSpan' o, [getSpan' r])] --TODO: uhhh
-  processExp (App _ l r)          = [(getSpan' l, [getSpan' r])]
+  processExp (InfixApp s l o r) = case o of
+    (QVarOp _ (UnQual _ (Symbol _ "."))) -> [(getSpan' l, cs s, [getSpan' r])]
+    (QVarOp _ (UnQual _ (Symbol _ "$"))) -> [(getSpan' l, cs s, [getSpan' r])]
+    _                                    -> [(getSpan' o, cs s, [getSpan' l, getSpan' r])]
+  processExp (LeftSection s l o)  = [(getSpan' o, cs s, [getSpan' l])]
+  processExp (RightSection s o r) = [(getSpan' o, cs s, [getSpan' r])] --TODO: uhhh
+  processExp (App s l r)          = [(getSpan' l, cs s, [getSpan' r])]
   processExp _ = []
   recurse :: a -> Apps
   recurse = concat . gmapQ getApps
+  cs = colSpan . srcInfoSpan
 
 -- Takes a list of apps, and merges by left-hand-span, and therefore app lhs.
-concatApps = map (second $ reverse . concat)
-           . combineFstOn (\((x, _), _) -> x)
-           . reverse
+concatApps :: Apps -> Apps
+concatApps = map process . groupSortOn (\((x, _), _, _) -> x) . reverse
+  where
+   process xs = (h, l, reverse . concat $ map thd3 xs)
+    where
+     ((h,_,_),(_,l,_)) = (head &&& last) $ sortBy (comparing (ivlWidth . snd3)) xs
 
 preferOk = rightToMaybe . parseResultToEither
 
+getType c = interpret c "MyMain" . I.typeOf . deMongol
+
+-- Actually unecessary
+deMongol = map (\c -> if c == gapChar then ' ' else c)
+
 getTypeMap :: String -> TaskChan -> Apps -> IO TypeMap
 getTypeMap txt c apps = do
-  rec <- liftM isRight . getType . recText1 $ words txt !! 0
-  fs <- mapM (getExpr rec . fst) apps
-  ps <- mapM (mapM (getExpr rec) . snd) apps
+  rec <- liftM isRight . getType c . recText1 $ words txt !! 0
+  fs <- mapM (getExpr rec . fst3) apps
+  ps <- mapM (mapM (getExpr rec) . thd3) apps
   return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
  where
   getExpr :: Bool -> Ivl -> IO (Maybe (Ivl, Type SrcSpanInfo))
   getExpr rec ivl
     = liftM (\t -> rightToMaybe t >>= liftM (ivl,) . preferOk . parseType)
-    . getType . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
-  getType = interpret c "MyMain" . I.typeOf . deMongol
+    . getType c . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
   recText1 x = "let {" ++ txt ++ "} in " ++ x
   recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
 
@@ -384,15 +451,13 @@ getTypeMap txt c apps = do
 getColorMap :: TypeMap -> Apps -> ColorMap
 getColorMap tm = M.fromList . (`zip` colours)
                . onub . sort . map (trim . prettyPrint)
-               . catMaybes . map (`M.lookup` tm) . concatMap snd
+               . catMaybes . map (`M.lookup` tm) . concatMap thd3
 
 colours :: [(Int, Int, Int)]
 colours = cycle $ map readColor
-  [ "99968b"
-  , "8f8f8f"
+  [ "8f8f8f"
   , "e5786d"
   , "95e454"
-  , "cae682"
   , "8ac6f2"
   , "e5786d"
   , "e7f6da"

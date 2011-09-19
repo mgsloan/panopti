@@ -50,6 +50,18 @@ secondM f = (\(x, y) -> f y >>= \y' -> return (x, y'))
 liftFst (x, y) = y >>= return . (x,)
 liftSnd (x, y) = x >>= return . (,y)
 
+fst3 (x, _, _) = x
+snd3 (_, x, _) = x
+thd3 (_, _, x) = x
+
+first3 f  (a, b, c) = (f a, b, c)
+second3 f (a, b, c) = (a, f b, c)
+third3 f  (a, b, c) = (a, b, f c)
+
+atMay [] _ = Nothing
+atMay (x:_) 0 = Just x
+atMay (_:xs) n = atMay xs (n-1)
+
 pairGroupBy :: (a -> a -> Bool) -> [a] -> [[a]]
 pairGroupBy f [] = []
 pairGroupBy f (x:xs) = helper . ((True, x):) $ zipWith (\a b -> (f a b, b)) xs (tail xs)
@@ -61,6 +73,8 @@ onub = onubBy (==)
 onubBy f = map head . pairGroupBy f
 
 debug x = trace (show x) x
+gdebug x = trace (gshow x) x
+gdebug' pre x = trace (pre ++ gshow x) x
 
 -- | Conditionally run an action, using a @Maybe a@ to decide.
 whenJust :: Monad m => Maybe a -> (a -> m ()) -> m ()
@@ -227,16 +241,16 @@ icontains :: Ivl -> Ivl -> Bool
 icontains (f, t) (f', t') = f <= f' && t' <= t
 
 atSpan :: (Data a) => Ivl -> a -> Maybe ExpS
-atSpan s = child `extQ` whenExp
+atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
  where
+  ifContains :: (Data a) => Maybe b -> a -> Maybe b
+  ifContains b x = do
+    sp <- getSpan x
+    if colSpan sp `icontains` s then b else Nothing
   whenExp :: ExpS -> Maybe ExpS
   whenExp x = maybe (Just x) Just $ child x
   child :: (Data x) => x -> Maybe ExpS
-  child x = do
-    sp <- getSpan x
-    if colSpan sp `icontains` s
-      then msum $ gmapQ (atSpan s) x
-      else Nothing
+  child x = ifContains (msum $ gmapQ (atSpan s) x) x
 
 {-
 parentOfSpan :: (Data a) => Ivl -> a -> Maybe (ExpS, Int)
