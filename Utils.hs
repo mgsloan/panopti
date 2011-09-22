@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleInstances, TemplateHaskell, TupleSections, TypeOperators,
-TypeFamilies, ParallelListComp, NoMonomorphismRestriction #-}
+TypeFamilies, ParallelListComp, NoMonomorphismRestriction, ScopedTypeVariables,
+RankNTypes #-}
 
 module Utils where
 
@@ -13,15 +14,17 @@ import Data.Char (isSpace)
 import Data.Data
 import Data.Function (on)
 import Data.Generics.Text (gshow)
+import Data.Generics.Schemes (listify)
 import Data.IORef
 import Data.Label
-import Data.List (sort, groupBy, sortBy, findIndex)
+import Data.List (sort, groupBy, sortBy, findIndex, (\\))
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
 import Data.Generics.Aliases
 import Debug.Trace
-import Language.Haskell.Exts.Annotated
+import Language.Haskell.Exts hiding (parseType)
+import qualified Language.Haskell.Exts.Annotated as A
 import Language.Haskell.Exts.Lexer
 import Language.Haskell.Exts.ParseMonad
 import Language.Haskell.Exts.SrcLoc
@@ -54,9 +57,11 @@ fst3 (x, _, _) = x
 snd3 (_, x, _) = x
 thd3 (_, _, x) = x
 
-first3 f  (a, b, c) = (f a, b, c)
+first3  f (a, b, c) = (f a, b, c)
 second3 f (a, b, c) = (a, f b, c)
-third3 f  (a, b, c) = (a, b, f c)
+third3  f (a, b, c) = (a, b, f c)
+
+uncurry3 f (a, b, c) = f a b c
 
 atMay [] _ = Nothing
 atMay (x:_) 0 = Just x
@@ -148,92 +153,99 @@ spanContains :: SrcSpan -> SrcLoc -> Bool
 spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c) =
   f == f' && (if sl == l then sc <= c else sl < l)
           && (if el == l then ec >= c else el > l)
-
-lexify = runParser lexRec 
- where
-  lexRec = runL (Lex lexer) (\x -> case unLoc x of
-      EOF -> return []
-      _ -> liftM (x:) lexRec)
-
--- Taken from Language.Haskell.Meta.Parse
-parseResultToEither :: ParseResult a -> Either String a
-parseResultToEither (ParseOk a) = Right a
-parseResultToEither (ParseFailed loc e)
-  = let line = srcLine loc - 1
-    in Left (unlines [show line,show loc,e])
-
 type STT = ST.State (String, M.Map String Char)
 
-cannonicalType :: Type SrcSpanInfo -> Type SrcSpanInfo
-cannonicalType t = ST.evalState (rec t) (['a'..], M.empty)
+cannonicalType :: Type -> Type
+cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
  where
-  doVar :: String -> STT String
-  doVar other = do
+  rec :: (Data a, Typeable a) => a -> STT a
+  rec = gmapM rec
+   `extM` (\n -> doName False n >>= return . snd)
+   `extM` (return :: QName -> STT QName)
+   `extM` doType
+
+  doName b (Ident n)  = doVar b n >>= \n' -> return (n, Ident n')
+  doName b (Symbol n) = doVar b n >>= \n' -> return (n, Symbol n')
+
+  -- Returns the new name associated with the given variable, or creates one.
+  -- The bool parameter determines if prior the prior rewrite for this variable
+  -- is overwritten
+  doVar :: Bool -> String -> STT String
+  doVar overwrite other = do
     (xs, m) <- ST.get
-    case M.lookup other m of
+    case if overwrite then Nothing else M.lookup other m of
       Just x -> return [x]
       Nothing -> ST.put (tail xs, M.insert other (head xs) m)
               >> return [head xs]
 
-  removeVar :: String -> STT ()
-  removeVar other = ST.modify (second $ M.delete other)
+  doBind (UnkindedVar n) = do
+    (o, n') <- doName True n
+    return (o, UnkindedVar n')
+  
+  doBind (KindedVar n k) = do
+    (o, n') <- doName True n
+    return (o, KindedVar n' k)
 
-  doName (Ident l n)  = doVar n >>= \n' -> return (n, Ident l n')
-  doName (Symbol l n) = doVar n >>= \n' -> return (n, Symbol l n')
+  removeVar :: M.Map String Char -> String -> STT ()
+  removeVar old other = ST.modify (second $ \m ->
+    maybe (M.delete other m) (\v -> M.insert other v old) (M.lookup other old))
 
-  doBind (KindedVar l n k) = do
-    (o, n') <- doName n
-    return (o, KindedVar l n' k)
-
-  doType :: Type SrcSpanInfo -> STT (Type SrcSpanInfo)
-  doType (TyForall l bnds ctx t) = do
+  doType :: Type -> STT Type
+  doType (TyForall bnds ctx t) = do
+    (_, old) <- ST.get
     bs <- maybeM (mapM doBind) bnds
-    cx <- maybeM rec ctx
+    cx <- rec ctx
     t' <- rec t
-    whenJust bs $ mapM_ (removeVar . fst)
-    return $ TyForall l (liftM (map snd) bs) cx t'
+    whenJust bs $ mapM_ (removeVar old . fst)
+    return $ TyForall (liftM (map snd) bs) cx t'
   doType t = gmapM rec t
 
-  preserveQ :: QName SrcSpanInfo -> STT (QName SrcSpanInfo)
-  preserveQ = return
-
-  rec :: (Data a, Typeable a) => a -> STT a
-  rec = gmapM rec
-   `extM` (\n -> doName n >>= return . snd)
-   `extM` preserveQ
-   `extM` doType
-
-splitFunc :: Type SrcSpanInfo -> [Type SrcSpanInfo]
+splitFunc :: Type -> [Type]
 splitFunc ty = case ty of
-    (TyForall l bnds (Just ctx) t) -> rec t . map (\a -> (vars a, a)) $ fromContext ctx
+    (TyForall bnds ctx t) -> rec t ctx
     t -> rec t []
  where
-  rec (TyFun l a b) as = toForall a as : rec b as
-  rec t as = [toForall t as]
+  rec t ctx = case t of
+    (TyFun a b) -> addCtx ctx a : rec b ctx
+    t -> [addCtx ctx t]
 
-  toForall t [] = t
-  toForall t as = TyForall l Nothing 
-    (Just . toContext l . map snd $ filter (overlaps $ vars t) as) t
-   where l = noInfoSpan . fromJust $ getSpan t
+-- Precondition for semantically correct splitting: type is cannonicalized
+splitType :: Type -> [Type]
+splitType (TyForall bnds ctx t) = map (addCtx ctx) $ splitType t
+splitType t@(TyVar _) = [t] 
+splitType t@(TyCon _) = [t] 
+splitType t@(TyInfix _ n _) = [TyCon n]
+splitType t = concat $ gmapQ (const [] `extQ` splitType) t
 
+listAll :: forall b c. (Data b) => (forall a. (Data a) => a -> [c]) -> b -> [c]
+listAll f = concat . gmapQ (\n -> f n ++ listAll f n)
+
+getVar :: Name -> [String]
+getVar (Ident n) = [n]
+getVar (Symbol n) = [n]
+
+getVars :: Data a => a -> [String]
+getVars = listAll (const [] `extQ` getVar)
+
+-- Free polymorphic variables in the type.
+freeVars :: (Data a) => a -> [String]
+freeVars = (concat . gmapQ (const [] `extQ` filterForall)) `extQ` getVar
+ where
+  filterForall :: Type -> [String]
+  filterForall (TyForall bnds _ t) = freeVars t \\ getVars bnds
+  filterForall t = freeVars t
+
+-- TODO: transitive closure on polymorphic var usage..
+addCtx [] t = t
+addCtx ctx t = uncurry3 TyForall
+            . second3 (++ (map snd . filter (overlaps $ freeVars t)
+                                   $ map (\a -> (getVars a, a)) ctx))
+            $ case t of
+              f@(TyForall b c i) -> (b, c, i)
+              t -> (Nothing, [], t)
+ where
   overlaps xs (ys, _) = any (`elem` ys) xs
-
-  vars :: (Data a) => a -> [String]
-  vars = (concat . gmapQ vars) `extQ` getVar
-
-  getVar :: Name SrcSpanInfo -> [String]
-  getVar (Ident _ n) = [n]
-  getVar (Symbol _ n) = [n]
-
-  fromContext (CxSingle l a) = [a]
-  fromContext (CxTuple l as) = as
-  fromContext (CxParen l c) = fromContext c
-  fromContext _ = []
-
-  toContext l [] = CxEmpty l
-  toContext l [a] = CxSingle l a
-  toContext l as = CxTuple l as
-
+  
 getExp :: (Data a) => a -> Maybe ExpS
 getExp = (const Nothing) `extQ` Just
 
@@ -252,30 +264,7 @@ atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
   child :: (Data x) => x -> Maybe ExpS
   child x = ifContains (msum $ gmapQ (atSpan s) x) x
 
-{-
-parentOfSpan :: (Data a) => Ivl -> a -> Maybe (ExpS, Int)
-parentOfSpan s = child
- where
-  rec :: (Data a) => a -> Maybe (Either (ExpS, Int) ExpS)
-  rec = (\x -> trace (gshow x) $ ((liftM Left . child) `extQ` (Just . whenExp)) x)
-  whenExp :: ExpS -> Either (ExpS, Int) ExpS
-  whenExp x = maybe (Right x) Left $ child x
-  child :: (Data a) => a -> Maybe (ExpS, Int)
-  child x = do
-    sp <- getSpan x
-    if trace (show (colSpan sp, s)) $ colSpan sp `icontains` s
-      then listToMaybe . sort . catMaybes . snd
-         $ ST.execState (gmapM process x) ([0..], [])
-      else Nothing
-  process :: (Data a) => a -> ST.State ([Int], [Maybe (ExpS, Int)]) a
-  process x = ST.modify (\((y:ys), xs) -> (ys,
-    case rec x of
-      Just (Right e) -> Just (e, y) : xs
-      Just (Left e) -> Just e : xs
-      Nothing -> Nothing : xs)) >> return x
--}
-
-type ExpS = Exp SrcSpanInfo
+type ExpS = A.Exp SrcSpanInfo
 
 toExpList :: ExpS -> [ExpS]
 toExpList e = e : catMaybes (gmapQ ((const Nothing) `extQ` Just) e)
@@ -291,3 +280,88 @@ fromExpList (e:ps) = ST.evalState (gmapM ((return . id) `extM` setParam) e) ps
 
 mutateExpList :: ([ExpS] -> [ExpS]) -> ExpS -> ExpS
 mutateExpList f = fromExpList . f . toExpList
+
+lexify = runParserWithMode parseMode lexRec 
+ where
+  lexRec = runL (Lex lexer) (\x -> case unLoc x of
+      EOF -> return []
+      _ -> liftM (x:) lexRec)
+
+-- Taken from Language.Haskell.Meta.Parse
+parseResultToEither :: ParseResult a -> Either String a
+parseResultToEither (ParseOk a) = Right a
+parseResultToEither (ParseFailed loc e)
+  = let line = srcLine loc - 1
+    in Left (unlines [show line,show loc,e])
+
+parseType :: String -> ParseResult Type
+parseType = parseTypeWithMode parseMode
+
+parseMode :: ParseMode
+parseMode = ParseMode "" extensions False False (Just baseFixities)
+ where
+  extensions = 
+    [ OverlappingInstances	 
+    , UndecidableInstances	 
+    , IncoherentInstances	 
+    , RecursiveDo	 
+    , ParallelListComp	 
+    , MultiParamTypeClasses	 
+    , NoMonomorphismRestriction	 
+    , FunctionalDependencies	 
+    , ExplicitForall	 
+    , Rank2Types	 
+    , RankNTypes	 
+    , PolymorphicComponents	 
+    , ExistentialQuantification	 
+    , ScopedTypeVariables	 
+    , ImplicitParams	 
+    , FlexibleContexts	 
+    , FlexibleInstances	 
+    , EmptyDataDecls	 
+    , CPP	 
+    , KindSignatures	 
+    , BangPatterns	 
+    , TypeSynonymInstances	 
+    , TemplateHaskell	 
+    , ForeignFunctionInterface	 
+    , Arrows	 
+    , Generics	 
+    , NoImplicitPrelude	 
+    , NamedFieldPuns	 
+    , PatternGuards	 
+    , GeneralizedNewtypeDeriving	 
+    , ExtensibleRecords	 
+    , RestrictedTypeSynonyms	 
+    , HereDocuments	 
+    , MagicHash	 
+    , TypeFamilies	 
+    , StandaloneDeriving	 
+    , UnicodeSyntax	 
+    , PatternSignatures	 
+    , UnliftedFFITypes	 
+    , LiberalTypeSynonyms	 
+    , TypeOperators	 
+    , RecordWildCards	 
+    , RecordPuns	 
+    , DisambiguateRecordFields	 
+    , OverloadedStrings	 
+    , GADTs	 
+    , MonoPatBinds	 
+    , NoMonoPatBinds	 
+    , RelaxedPolyRec	 
+    , ExtendedDefaultRules	 
+    , UnboxedTuples	 
+    , DeriveDataTypeable	 
+    , ConstrainedClassMethods	 
+    , PackageImports	 
+    , ImpredicativeTypes	 
+    , NewQualifiedOperators	 
+    , PostfixOperators	 
+    , QuasiQuotes	 
+    , TransformListComp	 
+    , ViewPatterns	 
+    , XmlSyntax	 
+    , RegularPatterns	 
+    , TupleSections
+    ]

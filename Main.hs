@@ -25,7 +25,8 @@ import Data.Ord (comparing)
 import Debug.Trace
 import Graphics.ToyFramework
 import qualified Graphics.Rendering.Cairo as C
-import Language.Haskell.Exts.Annotated
+import Language.Haskell.Exts (prettyPrint, Type(..), ParseResult(..), SrcLoc(..), Context)
+import qualified Language.Haskell.Exts.Annotated as A
 import qualified Language.Haskell.Interpreter as I
 import qualified System.Glib.MainLoop as G
 import System.Directory (createDirectoryIfMissing)
@@ -40,20 +41,25 @@ import System.Directory (createDirectoryIfMissing)
  * Live update of running haskell program
  * Detection of untenable type classes
  * Contextual Hoogle / paste buffers
+ * Illustration of which types have changed with edits
+ * Mode for type information relevant to selection
+ * Visualization of parallel possibilities for expression tree
+   - Depiction of seminal style autofix possibilities
+   - Depiction of unmerged collaborative edits
+ * Application of visual pretty printing / pretty editing
 
  -}
 
 type Apps = [(Ivl, Ivl, [Ivl])]
 type ColorMap = M.Map String (Int, Int, Int)
 type GapMap = IM.IntervalMap Int Int
-type TypeMap = M.Map Ivl (Type SrcSpanInfo)
+type TypeMap = M.Map Ivl Type
 type Errors = [(Ivl, String)]
-
 
 data Results = Results
   { _source :: String 
   , _partial_source :: String
-  , _decl :: Decl SrcSpanInfo
+  , _decl :: A.Decl A.SrcSpanInfo
   , _appIvls :: Apps
   , _typeMap :: TypeMap
   , _colorMap :: ColorMap
@@ -129,14 +135,6 @@ getSelection s = substr (get cursor s) (get code s)
 handleKey :: Bool -> Either [Char] Char -> State -> IO State
 handleKey True (Left "Escape") _ = error "User escape"
 
-handleKey True (Right 'y') s = update =<< addPaste (getSelection s) s
-handleKey True (Right 'd') s = update =<< addPaste (getSelection s)
-  ( set cursor (fst ivl, fst ivl)
-  . set user Normal
-  $ modify code (subst ivl "") s)
- where
-  ivl = get cursor s
-
 handleKey True (Right k) s@(State xs ix Normal _ _ _ _ _ _) = do
   ctrl <- eitherHeld "Control" s
   case (ctrl, k) of
@@ -169,15 +167,21 @@ handleKey True (Left k) s@(State xs _ Normal _ _ _ _ _ _) = do
 
 handleKey True (Right k) s@(State xs ix (Selection _) _ _ _ _ _ _) = do
   shift <- eitherHeld "Shift" s
-  maybe (return s) (if shift then update else return)
-    (case toLower k of
-      'k' -> liftM (\((ivl, _), _) -> set cursor ivl s) parent
-      'j' -> maySetCursor $ childSpan' (ix, 0)
-      'h' -> parent >>= (\(p, _) -> (if shift then moveIx else mutateIx)
-                                    (wrapped (fst p) . (subtract 1)) p)
-      'l' -> parent >>= (\(p, _) -> (if shift then moveIx else mutateIx)
-                                    (wrapped (fst p) . (+1)) p)
-      _ -> Nothing)
+  case toLower k of
+    'y' -> update =<< addPaste (getSelection s) s
+    'd' -> update =<< addPaste (getSelection s)
+      ( set cursor (fst ix, fst ix)
+      . set user Normal
+      $ modify code (subst ix "") s)
+    k -> maybe (return s) (if shift then update else return)
+      (case k of
+        'k' -> liftM (\((ivl, _), _) -> set cursor ivl s) parent
+        'j' -> maySetCursor $ childSpan' (ix, 0)
+        'h' -> parent >>= (\(p, _) -> (if shift then moveIx else mutateIx)
+                                      (wrapped (fst p) . (subtract 1)) p)
+        'l' -> parent >>= (\(p, _) -> (if shift then moveIx else mutateIx)
+                                      (wrapped (fst p) . (+1)) p)
+        _ -> Nothing)
  where
   wrapped c = (`mod` (maybe 1 id $ arity c))
   --TODO: use for parameter introduction
@@ -255,7 +259,7 @@ handleDisplay _ (tl, br) s@(State txt ix user p c (_, ypos) _ _ _) = do
        $ boundPoints [(w * f, a), (w * t, -d)]
   C.fill
   
-  whenJust p (\t -> drawApps (textPos ^-^ (0, 25)) c t)
+  whenJust p (\t -> drawTypes (textPos ^-^ (0, 25)) c t)
 
   setColor $ readColor "f6f3e8"
   move textPos
@@ -276,10 +280,83 @@ spanLine txt (f, t) = liftM (mapT reverseLinear . rside 2 . expandR 2)
 
 type HeightMap = IM.IntervalMap Int Double
 
-getHeight :: (Double, Double) -> Ivl -> IM.IntervalMap Int Double -> Double
+getHeight :: DPoint -> Ivl -> IM.IntervalMap Int Double -> Double
 getHeight (_, y) (f, t) = minimum . (y:) . map snd . intersections (IM.Interval f t)
 
-drawApps :: (Double, Double) -> TaskChan -> Results  -> C.Render ()
+-- TODO: consider selecting the primitive types based on repetition counts /
+-- some fitness factor / etc.
+
+drawLTR :: (a -> C.Render DRect) -> [a] -> C.Render DRect
+drawLTR f = liftM (foldl1 Data.Curve.union)
+          . mapM (\x -> do
+              r <- f x
+              move $ rside 1 r `at` 0.5
+              return r)
+
+surround :: String -> String -> DRect -> C.Render DRect
+surround pre post r = do
+  from <- liftM (((rside 3 r `at` 0.5) ^-^) . second (/(-2))) $ textSize pre  
+  move from
+  C.showText pre
+  psz <- textSize post
+  let to = (rside 1 r `at` 0.5) ^+^ (second (/2) psz)
+  move $ to ^-^ (fst psz, 0)
+  C.showText post
+  return $ boundPoints [from, to] `Data.Curve.union` r
+
+drawTypes :: DPoint -> TaskChan -> Results -> C.Render ()
+drawTypes pos c (Results txt ftxt _ apps tm tc es) = do
+  let prims = onub . sort . map (prettyPrint . cannonicalType)
+            . concatMap splitType $ M.elems tm
+      cmap = M.fromList $ zip prims colours
+  mapM_ (drawType cmap) (M.toList tm)
+  C.setFontSize 20
+ where
+  drawType :: M.Map String (Int, Int, Int) -> (Ivl, Type) -> C.Render DRect
+  drawType m (ivl, t) = do
+    C.setFontSize 20
+    sp <- spanLine txt ivl
+    C.setFontSize 10
+    move $ (pos ^+^ sp `at` 0.5)
+    rec [] t
+   where
+    rec :: Context -> Type -> C.Render DRect
+    rec ctx t@(TyFun _ _) = do
+      rect <- drawLTR (rec ctx) $ splitFunc t
+      let line = toBezier $ offset (0, -4) $ rside 0 rect
+      draw line
+      drawArrow 4 1 0.8 line
+      C.stroke
+      return rect
+    rec ctx (TyTuple _ xs) = do
+      rect <- drawLTR (rec ctx) xs
+      surround "(" ")" rect
+    rec ctx (TyList t) = do
+      rect <- rec ctx t
+      surround "[" "]" rect
+    rec ctx t@(TyVar _) = prim ctx t
+    rec ctx t@(TyCon _) = prim ctx t
+    rec ctx (TyForall _ ctx' t) = rec (ctx' ++ ctx) t
+    rec ctx t = fallback t
+    prim ctx t =
+      case M.lookup (prettyPrint $ addCtx ctx t) m of
+        Just c -> do
+          pnt <- liftM (^+^ (6, 0)) $ C.getCurrentPoint
+          setColor c
+          move pnt
+          C.arc (fst pnt) (snd pnt) 3 0 (2 * pi)
+          bnds <- pathBounds
+          C.fill
+          return bnds
+        Nothing -> fallback t
+    fallback t = do
+      let txt = prettyPrint t
+      sz <- textSize txt
+      fr <- C.getCurrentPoint
+      relMove (0, snd sz / 2)
+      return $ boundPoints [fr, fr ^+^ (fst sz, 0)]
+
+drawApps :: DPoint -> TaskChan -> Results -> C.Render ()
 drawApps pos c (Results txt ftxt _ apps tm tc es) = do
   mapM_ drawError es
   drawGaps
@@ -317,14 +394,14 @@ drawApps pos c (Results txt ftxt _ apps tm tc es) = do
     fspan <- spanLine txt func
     foldM (\h -> drawFunc tm tc h . (, undefined, [])) hm 
           $ filter (not . (`elem` (map fst3 apps))) params
-    let pts = liftM (map cannonicalType . drop (length params + 1) . splitFunc)
+    let pts = liftM (debug . map cannonicalType . drop (length params + 1) . splitFunc .  debug)
             $ M.lookup func tm
     foldM (drawParam fspan) hm 
         . (++ map (\t -> (func, Nothing, Just t)) (maybe [] id pts))
         . map (\r -> (func, Just r,) $ M.lookup r tm)
         $ reverse params
    where
-    drawParam :: DLine -> HeightMap -> (Ivl, Maybe Ivl, Maybe (Type SrcSpanInfo)) 
+    drawParam :: DLine -> HeightMap -> (Ivl, Maybe Ivl, Maybe Type) 
               -> C.Render HeightMap
     drawParam fs hm (fivl, pivl', t) = do
       maybe (setColor ((1,1,1) :: DColor)) setColor 
@@ -360,7 +437,7 @@ drawApps pos c (Results txt ftxt _ apps tm tc es) = do
       
 
 update :: State -> IO State
-update s = (parsed' $ partialParse parseDecl txt) >>= flip (setM parsed) s
+update s = (parsed' $ partialParse A.parseDecl txt) >>= flip (setM parsed) s
  where
   txt = get code s 
   parsed' (Just (decl, txt', errs)) = do
@@ -382,12 +459,12 @@ partialParse f txt = rec Nothing txt
     ParseOk decl -> Just (decl, txt, [])
     ParseFailed l err -> trace err $ if (Just l == prior) then Nothing else
       case (lexify txt) of
-        ParseOk xs -> case findIndex ((`spanContains` l) . loc) xs of
+        ParseOk xs -> case findIndex ((`spanContains` l) . A.loc) xs of
           Just ix -> msum 
                    [ process l err (fr, to)
-                   | fr <- map (subtract 1 . srcSpanStartColumn . loc . (xs !!))
+                   | fr <- map (subtract 1 . A.srcSpanStartColumn . A.loc . (xs !!))
                                [ix, ix - 1 .. max 0 (ix - 9)]
-                   , to <- map (subtract 1 . srcSpanEndColumn   . loc . (xs !!))
+                   , to <- map (subtract 1 . A.srcSpanEndColumn   . A.loc . (xs !!))
                                [ix .. min (ix + 2) (length xs - 1)]]
           Nothing -> Nothing
         ParseFailed l err -> trace err Nothing
@@ -405,17 +482,17 @@ getApps :: forall a. (Data a) => a -> Apps
 getApps ast = ((const []) `extQ` processExp) ast ++ recurse ast
  where
   processExp :: ExpS -> Apps
-  processExp (InfixApp s l o r) = case o of
-    (QVarOp _ (UnQual _ (Symbol _ "."))) -> [(getSpan' l, cs s, [getSpan' r])]
-    (QVarOp _ (UnQual _ (Symbol _ "$"))) -> [(getSpan' l, cs s, [getSpan' r])]
-    _                                    -> [(getSpan' o, cs s, [getSpan' l, getSpan' r])]
-  processExp (LeftSection s l o)  = [(getSpan' o, cs s, [getSpan' l])]
-  processExp (RightSection s o r) = [(getSpan' o, cs s, [getSpan' r])] --TODO: uhhh
-  processExp (App s l r)          = [(getSpan' l, cs s, [getSpan' r])]
+  processExp (A.InfixApp s l o r) = case o of
+    (A.QVarOp _ (A.UnQual _ (A.Symbol _ "."))) -> [(getSpan' l, cs s, [getSpan' r])]
+    (A.QVarOp _ (A.UnQual _ (A.Symbol _ "$"))) -> [(getSpan' l, cs s, [getSpan' r])]
+    _                                          -> [(getSpan' o, cs s, [getSpan' l, getSpan' r])]
+  processExp (A.LeftSection s l o)  = [(getSpan' o, cs s, [getSpan' l])]
+  processExp (A.RightSection s o r) = [(getSpan' o, cs s, [getSpan' r])] --TODO: uhhh
+  processExp (A.App s l r)          = [(getSpan' l, cs s, [getSpan' r])]
   processExp _ = []
   recurse :: a -> Apps
   recurse = concat . gmapQ getApps
-  cs = colSpan . srcInfoSpan
+  cs = colSpan . A.srcInfoSpan
 
 -- Takes a list of apps, and merges by left-hand-span, and therefore app lhs.
 concatApps :: Apps -> Apps
@@ -439,7 +516,7 @@ getTypeMap txt c apps = do
   ps <- mapM (mapM (getExpr rec) . thd3) apps
   return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
  where
-  getExpr :: Bool -> Ivl -> IO (Maybe (Ivl, Type SrcSpanInfo))
+  getExpr :: Bool -> Ivl -> IO (Maybe (Ivl, Type))
   getExpr rec ivl
     = liftM (\t -> rightToMaybe t >>= liftM (ivl,) . preferOk . parseType)
     . getType c . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
