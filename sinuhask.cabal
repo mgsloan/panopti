@@ -1,0 +1,20 @@
+Name:                sinuhask
+Version:             0.0.1
+Cabal-Version:       >= 1.2
+Synopsis:            
+Category:            
+Description:         
+License:             BSD3
+License-file:        LICENSE
+Author:              Michael Sloan
+Maintainer:          Michael Sloan <mgsloan@gmail.com>
+Stability:           experimental
+Build-Type:          Simple
+
+executable sinu
+  Main-Is:           Main.hs
+  Extensions:        DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell,
+                     TupleSections
+  Build-Depends:     array, base, cairo, containers, colour, curve, directory,
+                     fclabels, fingertree, glib, haskell-src-exts, hint, syb,
+                     mtl, toyframework
