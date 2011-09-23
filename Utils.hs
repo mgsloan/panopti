@@ -57,6 +57,10 @@ fst3 (x, _, _) = x
 snd3 (_, x, _) = x
 thd3 (_, _, x) = x
 
+rmfst3 (_, a, b) = (a, b)
+rmsnd3 (a, _, b) = (a, b)
+rmthd3 (a, b, _) = (a, b)
+
 first3  f (a, b, c) = (f a, b, c)
 second3 f (a, b, c) = (a, f b, c)
 third3  f (a, b, c) = (a, b, f c)
@@ -76,6 +80,8 @@ pairGroupBy f (x:xs) = helper . ((True, x):) $ zipWith (\a b -> (f a b, b)) xs (
 
 onub = onubBy (==)
 onubBy f = map head . pairGroupBy f
+
+onubSortBy f = onubBy ((==) `on` f) . sortBy (comparing f)
 
 debug x = trace (show x) x
 gdebug x = trace (gshow x) x
@@ -228,21 +234,23 @@ getVars :: Data a => a -> [String]
 getVars = listAll (const [] `extQ` getVar)
 
 -- Free polymorphic variables in the type.
-freeVars :: (Data a) => a -> [String]
-freeVars = (concat . gmapQ (const [] `extQ` filterForall)) `extQ` getVar
+freeVars :: Type -> [String]
+freeVars = filterForall 
  where
+  rec :: (Data a) => a -> [String]
+  rec = (concat . gmapQ (rec `extQ` filterForall)) `extQ` getVar
   filterForall :: Type -> [String]
-  filterForall (TyForall bnds _ t) = freeVars t \\ getVars bnds
-  filterForall t = freeVars t
+  filterForall (TyForall bnds _ t) = rec t \\ getVars bnds
+  filterForall t = rec t
 
 -- TODO: transitive closure on polymorphic var usage..
 addCtx [] t = t
 addCtx ctx t = uncurry3 TyForall
-            . second3 (++ (map snd . filter (overlaps $ freeVars t)
-                                   $ map (\a -> (getVars a, a)) ctx))
-            $ case t of
-              f@(TyForall b c i) -> (b, c, i)
-              t -> (Nothing, [], t)
+             . second3 (++ (map snd . filter (overlaps $ freeVars t)
+                                    $ map (\a -> (getVars a, a)) ctx))
+             $ case t of
+               f@(TyForall b c i) -> (b, c, i)
+               t -> (Nothing, [], t)
  where
   overlaps xs (ys, _) = any (`elem` ys) xs
   

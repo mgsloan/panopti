@@ -1,4 +1,4 @@
-{-# LANGUAGE ExistentialQuantification, ScopedTypeVariables, PatternGuards, FlexibleContexts #-}
+{-# LANGUAGE RankNTypes, ExistentialQuantification, ScopedTypeVariables, PatternGuards, FlexibleContexts #-}
 
 module Simple
     ( Task (..), TaskChan
@@ -11,11 +11,12 @@ module Simple
 import Language.Haskell.Interpreter hiding (interpret)
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar, tryPutMVar)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Exception (SomeException, catch)
 import Control.Monad (when, forever)
 import Control.Monad.Error (MonadError, catchError)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
 import Prelude hiding (catch)
 
@@ -32,27 +33,35 @@ newtype TaskChan
 startGHCiServer :: [String] -> (String -> IO ()) -> (String -> IO ()) -> IO TaskChan
 startGHCiServer paths{-searchpaths-} logError logMsg = do
     ch <- newChan 
+    ref <- newIORef (const $ return ())
 
     _ <- forkIO $ forever $ do
         logMsg "start interpreter"
-        e <- runInterpreter (handleTask ch Nothing)
-              `catch` \(e :: SomeException) ->
-                return $ Left $ UnknownError "GHCi server died."
+        e <- runInterpreter (handleTask ref ch Nothing)
+              `catch` \(e :: SomeException) -> do
+                let err = UnknownError ("GHCi server died:" ++ show e)
+                doPut <- readIORef ref
+                doPut err
+                return $ Left err
         case e of
             Left  e  -> logError $ "stop interpreter: " ++ show e
-            Right () -> return ()
+            Right _  -> return ()
 
     return $ TC ch
 
   where
-    handleTask :: Chan (Maybe Task) -> Maybe FilePath -> Interpreter ()
-    handleTask ch oldFn = do
+    handleTask :: IORef (InterpreterError -> IO ())
+               -> Chan (Maybe Task) -> Maybe FilePath -> Interpreter ()
+    handleTask ref ch oldFn = do
         task <- lift $ readChan ch
         case task of
-            Just task -> handleTask_ ch oldFn task
-            Nothing   -> liftIO $ logError "interpreter stopped intentionally"
+            Just task@(Task fn repVar m) -> do
+              lift $ writeIORef ref (\x -> tryPutMVar repVar (Left x) >> return ())
+              handleTask_ ref ch oldFn task
+            Nothing ->
+              liftIO $ logError "interpreter stopped intentionally"
 
-    handleTask_ ch oldFn (Task fn repVar m) = do
+    handleTask_ ref ch oldFn (Task fn repVar m) = do
         (cont, res) <- do  
             when (oldFn /= Just fn) $ do
                 reset
@@ -67,7 +76,7 @@ startGHCiServer paths{-searchpaths-} logError logMsg = do
             return (not $ fatal er, Left er)
 
         lift $ putMVar repVar res
-        when cont $ handleTask ch $ case res of
+        when cont $ handleTask ref ch $ case res of
             Right _ -> Just fn
             Left  _ -> Nothing
 
