@@ -43,6 +43,10 @@ import Lexer        ( P(..), ParseResult(..), mkPState )
 import Parser       ( parseStmt, parseType )
 import FastString   ( fsLit )
 
+#if __GLASGOW_HASKELL__ >= 701
+import Outputable
+#endif
+
 #if __GLASGOW_HASKELL__ >= 700
 import DynFlags     ( xFlags, xopt )
 #else

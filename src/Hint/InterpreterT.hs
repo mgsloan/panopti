@@ -17,7 +17,6 @@ import Control.Monad.Reader
 import Control.Monad.Error
 import Control.Monad.CatchIO
 
-import Data.Generics.Text (gshow)
 import Data.Typeable ( Typeable )
 import Control.Concurrent.MVar
 import System.IO.Unsafe ( unsafePerformIO )
@@ -33,6 +32,8 @@ import Debug.Trace
 
 import qualified GHC.Paths
 
+import qualified ErrUtils as GHC
+import qualified SrcLoc as GHC
 import qualified Hint.GHC as GHC
 import qualified Hint.Compat as Compat
 
@@ -82,7 +83,7 @@ execute s = GHC.runGhcT (Just GHC.Paths.libdir)
 instance MonadTrans InterpreterT where
     lift = InterpreterT . lift . lift . lift
 
-gdebug x = trace (gshow x) x
+debug x = trace (show x) x
 
 runGhc_impl :: (MonadCatchIO m, Functor m) => RunGhc (InterpreterT m) a
 runGhc_impl a = InterpreterT (lift (lift a))
@@ -93,11 +94,20 @@ runGhc_impl a = InterpreterT (lift (lift a))
     where rethrowGE = throwError . GhcException
           rethrowWC = throwError
                     . WontCompile
-                    . map (GhcError . show)
-                    . gdebug
+                    . map (makeSimpleError . show)
+                    . debug
                     . GHC.bagToList
                     . GHC.srcErrorMessages
+
 #endif
+
+makeSimpleError :: String -> GhcError
+makeSimpleError e = GhcError $
+  ( GHC.SevFatal
+  , span
+  , GHC.errMsgShortDoc $ GHC.mkPlainErrMsg span (GHC.text $ "GHCi server died:" ++ e))
+ where
+  span = GHC.mkGeneralSrcSpan (GHC.fsLit "")
 
 showGhcEx :: GHC.GhcException -> String
 showGhcEx = flip GHC.showGhcException ""
@@ -123,15 +133,17 @@ initialize args =
        -- available; calling this function once is mandatory!
        _ <- runGhc1 GHC.setSessionDynFlags df2{GHC.log_action = log_handler}
 
-#if __GLASGOW_HASKELL__ >= 700
-       let extMap      = map (\(a,b,_) -> (a,b)) GHC.xFlags
+{-
+if __GLASGOW_HASKELL__ >= 700
+       let extMap      = map (\(a,b,_,_) -> (a,b)) GHC.xFlags
        let toOpt e     = let err = error ("init error: unknown ext:" ++ show e)
                          in fromMaybe err (lookup e extMap)
        let getOptVal e = (asExtension e, GHC.xopt (toOpt e) df2)
        let defExts = map  getOptVal Compat.supportedExtensions
-#else
+else
+-}
        let defExts = zip availableExtensions (repeat False)
-#endif
+-- #endif
 
        onState (\s -> s{defaultExts = defExts})
 
@@ -214,14 +226,7 @@ newSessionData  a =
        }
 
 mkLogHandler :: IORef [GhcError] -> GhcErrLogger
-mkLogHandler r _ src style msg = modifyIORef r (errorEntry :)
-    where errorEntry = mkGhcError src style msg
-
-mkGhcError :: GHC.SrcSpan -> GHC.PprStyle -> GHC.Message -> GhcError
-mkGhcError src_span style msg = GhcError{errMsg = niceErrMsg}
-    where niceErrMsg = GHC.showSDoc . GHC.withPprStyle style $
-                         GHC.mkLocMessage src_span msg
-
+mkLogHandler r sev src style msg = modifyIORef r (GhcError (sev, src, msg) :)
 
 -- The MonadInterpreter instance
 

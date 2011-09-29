@@ -41,15 +41,12 @@ getModuleExports mn =
        return (asModElemList $ catMaybes exports)
 
 asModElemList :: [GHC.TyThing] -> [ModuleElem]
-asModElemList xs = concat [cs',
-                           ts',
+asModElemList xs = concat [ts',
                            ds \\ (concatMap (map Fun . children) ts'),
-                           fs \\ (concatMap (map Fun . children) cs')]
-    where (cs,ts,ds,fs) = ([asModElem c | c@GHC.AClass{}   <- xs],
-                           [asModElem t | t@GHC.ATyCon{}   <- xs],
-                           [asModElem d | d@GHC.ADataCon{} <- xs],
-                           [asModElem f | f@GHC.AnId{}     <- xs])
-          cs' = [Class n $ filter (alsoIn fs) ms  | Class n ms  <- cs]
+                           fs]
+    where (ts,ds,fs) = ([asModElem t | t@GHC.ATyCon{}   <- xs],
+                        [asModElem d | d@GHC.ADataCon{} <- xs],
+                        [asModElem f | f@GHC.AnId{}     <- xs])
           ts' = [Data  t $ filter (alsoIn ds) dcs | Data  t dcs <- ts]
           alsoIn es = (`elem` (map name es))
 
@@ -59,8 +56,7 @@ asModElem (GHC.AnId f)      = Fun $ getUnqualName f
 asModElem (GHC.ADataCon dc) = Fun $ getUnqualName dc
 asModElem (GHC.ATyCon tc)   = Data  (getUnqualName tc)
                                     (map getUnqualName $ GHC.tyConDataCons tc)
-asModElem (GHC.AClass c)    = Class (getUnqualName c)
-                                    (map getUnqualName $ GHC.classMethods c)
+asModElem _ = undefined
 
 getUnqualName :: GHC.NamedThing a => a -> String
 getUnqualName = GHC.showSDocUnqual . GHC.pprParenSymName

@@ -14,17 +14,21 @@ newtype Kind = Kind GHC.Kind
 supportedExtensions = map (\(e,_,_,_) -> e) GHC.xFlags
 
 setContext :: GHC.GhcMonad m => [GHC.Module] -> [GHC.Module] -> m ()
-setContext xs = GHC.setContext . map GHC.IIModule . (xs++)
+setContext xs = GHC.setContext xs . map (GHC.simpleImportDecl . GHC.moduleName)
 
 getContext :: GHC.GhcMonad m => m ([GHC.Module], [GHC.Module])
-getContext = fmap (\bs -> ([], [m | GHC.IIModule m <- bs])) GHC.getContext
+getContext = do 
+  (as, bs) <- GHC.getContext
+  bs' <- mapM ((`GHC.lookupModule` Nothing) . GHC.unLoc . GHC.ideclName) bs
+  return (as, bs')
 
 mkPState = GHC.mkPState
 
 #elif __GLASGOW_HASKELL__ >= 700
+-- supportedLanguages :: [String]
 supportedExtensions = map (\(e,_,_) -> e) GHC.xFlags
 
--- setContext :: GHC.GhcMonad m => [GHC.Module] -> [GHC.Module] -> m ()
+setContext :: GHC.GhcMonad m => [GHC.Module] -> [GHC.Module] -> m ()
 setContext xs = GHC.setContext xs . map (\y -> (y,Nothing))
 
 getContext :: GHC.GhcMonad m => m ([GHC.Module], [GHC.Module])
@@ -121,10 +125,10 @@ configureDynFlags dflags = dflags{GHC.ghcMode    = GHC.CompManager,
 #endif
 
   -- 6.08 and above
-pprType :: GHC.Type -> (GHC.PprStyle -> GHC.Doc)
+pprType :: GHC.Type -> GHC.SDoc
 pprType = GHC.pprTypeForUser False -- False means drop explicit foralls
 
-pprKind :: GHC.Kind -> (GHC.PprStyle -> GHC.Doc)
+pprKind :: GHC.Kind -> GHC.SDoc
 pprKind = pprType
 
 #elif __GLASGOW_HASKELL__ >= 606
