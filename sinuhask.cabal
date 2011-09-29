@@ -13,8 +13,35 @@ Build-Type:          Simple
 
 executable sinu
   Main-Is:           Main.hs
+  Other-Modules:     ErrorParser, Utils, Simple
   Extensions:        DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell,
                      TupleSections
-  Build-Depends:     array, base, cairo, containers, colour, curve, directory,
-                     fclabels, fingertree, glib, haskell-src-exts, hint, syb,
-                     mtl, toyframework
+  Build-Depends:     array,
+                     attoparsec,
+                     attoparsec-enumerator,
+                     base,
+                     Cabal,
+                     cairo,
+                     containers,
+                     colour,
+                     curve,
+                     directory,
+                     enumerator,
+                     fclabels,
+                     filepath,
+                     fingertree,
+                     ghc,
+                     ghc-mtl,
+                     ghc-paths,
+                     glib,
+                     haskell-src,
+                     haskell-src-exts,
+                     hint,
+                     rex,
+                     mtl,
+                     old-time,
+                     syb,
+                     template-haskell,
+                     toyframework,
+                     utf8-string,
+                     random

@@ -8,6 +8,7 @@ module Simple
     , catchError_fixed
     ) where
 
+-- GHC
 import Language.Haskell.Interpreter hiding (interpret)
 
 import Control.Concurrent (forkIO)
@@ -31,7 +32,7 @@ newtype TaskChan
 ---------------
 
 startGHCiServer :: [String] -> (String -> IO ()) -> (String -> IO ()) -> IO TaskChan
-startGHCiServer paths{-searchpaths-} logError logMsg = do
+startGHCiServer paths filepath modul logError logMsg = do
     ch <- newChan 
     ref <- newIORef (const $ return ())
 

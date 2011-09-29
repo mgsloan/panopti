@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleInstances, TemplateHaskell, TupleSections, TypeOperators,
 TypeFamilies, ParallelListComp, NoMonomorphismRestriction, ScopedTypeVariables,
-RankNTypes #-}
+QuasiQuotes, RankNTypes #-}
 
 module Utils where
 
@@ -11,7 +11,7 @@ import Control.Concurrent.MVar
 import Control.Monad (liftM, msum)
 import qualified Control.Monad.State as ST
 import Data.Char (isSpace)
-import Data.Data
+import Data.Data hiding (typeOf)
 import Data.Function (on)
 import Data.Generics.Text (gshow)
 import Data.Generics.Schemes (listify)
@@ -28,9 +28,14 @@ import qualified Language.Haskell.Exts.Annotated as A
 import Language.Haskell.Exts.Lexer
 import Language.Haskell.Exts.ParseMonad
 import Language.Haskell.Exts.SrcLoc
+import Language.Haskell.TH.Quote
+import qualified Text.Regex.PCRE.Rex as PCRE
+-- import qualified Text.Regex.PCRE.Light as PCRE
 
 -- Actual utils.
 -------------------------------------------------------------------------------
+
+rex = PCRE.makeQuasiMultiline $ PCRE.rexConf False True "id" [] []
 
 modM :: Monad m => (b :-> a) -> (a -> a) -> b -> m b
 modM l f = return . modify l f
@@ -71,12 +76,12 @@ atMay [] _ = Nothing
 atMay (x:_) 0 = Just x
 atMay (_:xs) n = atMay xs (n-1)
 
-pairGroupBy :: (a -> a -> Bool) -> [a] -> [[a]]
 pairGroupBy f [] = []
-pairGroupBy f (x:xs) = helper . ((True, x):) $ zipWith (\a b -> (f a b, b)) xs (tail xs)
-  where helper [] = []
-        helper (x:xs) = (map snd (x:pre)) : helper post
-          where (pre, post) = span fst xs
+pairGroupBy f [x] = [[x]]
+pairGroupBy f (x:y:xs) 
+  = if f x y then (x:y'):ys' else [x]:y':ys'
+ where
+  (y':ys') = pairGroupBy f (y:xs)
 
 onub = onubBy (==)
 onubBy f = map head . pairGroupBy f
@@ -120,6 +125,8 @@ subst (f, t) xs ys = (take f ys) ++ xs ++ drop t ys
 
 rightToMaybe = either (const Nothing) Just
 leftToMaybe  = either Just (const Nothing)
+
+mapEither f g = either (Left . f) (Right . g)
 
 isRight (Right _) = True
 isRight _ = False
@@ -274,6 +281,7 @@ atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
 
 type ExpS = A.Exp SrcSpanInfo
 
+{-
 toExpList :: ExpS -> [ExpS]
 toExpList e = e : catMaybes (gmapQ ((const Nothing) `extQ` Just) e)
 
@@ -288,6 +296,7 @@ fromExpList (e:ps) = ST.evalState (gmapM ((return . id) `extM` setParam) e) ps
 
 mutateExpList :: ([ExpS] -> [ExpS]) -> ExpS -> ExpS
 mutateExpList f = fromExpList . f . toExpList
+-}
 
 lexify = runParserWithMode parseMode lexRec 
  where
