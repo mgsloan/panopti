@@ -13,9 +13,56 @@ Build-Type:          Simple
 
 executable sinu
   Main-Is:           Main.hs
+  Hs-Source-Dirs:    src
+  Ghc-Options:        -Wall -O2
   Other-Modules:     ErrorParser, Utils, Simple
-  Extensions:        DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell,
+  Other-Modules:     ErrorParser
+                     Utils
+                     Simple
+
+                     -- Hint modules
+                     Language.Haskell.Interpreter
+                     Language.Haskell.Interpreter.Extension
+                     Language.Haskell.Interpreter.Unsafe
+                     Language.Haskell.Interpreter.GHC
+                     Language.Haskell.Interpreter.GHC.Unsafe
+                     Hint.GHC
+                     Hint.Base
+                     Hint.InterpreterT
+                     Hint.Compat
+                     Hint.Configuration
+                     Hint.Extension
+                     Hint.Context
+                     Hint.Conversions
+                     Hint.Eval
+                     Hint.Parsers
+                     Hint.Reflection
+                     Hint.Typecheck
+                     Hint.Sandbox
+                     Hint.SignalHandlers
+                     Hint.Util
+
+  Extensions:        DoAndIfThenElse
+                     ScopedTypeVariables
+                     TemplateHaskell
                      TupleSections
+
+                     -- Hint extensions
+                     CPP
+                     GeneralizedNewtypeDeriving
+                     MultiParamTypeClasses
+                     DeriveDataTypeable
+                     MagicHash
+                     TypeSynonymInstances
+                     FlexibleInstances
+                     FlexibleContexts
+                     FunctionalDependencies
+                     KindSignatures
+                     Rank2Types
+                     ScopedTypeVariables
+                     ExistentialQuantification
+                     PatternGuards
+                     
   Build-Depends:     array,
                      attoparsec,
                      attoparsec-enumerator,
@@ -44,4 +91,6 @@ executable sinu
                      template-haskell,
                      toyframework,
                      utf8-string,
-                     random
+                     random,
+                     extensible-exceptions,
+                     MonadCatchIO-mtl >= 0.2

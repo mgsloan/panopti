@@ -1,22 +1,16 @@
 {-# LANGUAGE DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell, TupleSections #-}
 
-import GhcDriver.Server
-import GhcDriver.Wrapper
---import Simple
+import Simple
 import Utils
-import ErrorParser
-
--- GHC
-import Outputable (showSDoc)
+-- import ErrorParser
 
 import Prelude hiding ((.))
 
 import Control.Arrow ((***), (&&&), first, second)
 import Control.Category ((.))
-import Control.Monad (liftM, zipWithM_, foldM, foldM_, msum)
-import Data.Char (isSpace, toLower)
+import Control.Monad (liftM, zipWithM_, foldM, foldM_)
+import Data.Char (toLower)
 import Data.Colour.SRGB (channelRed, channelGreen, channelBlue, toSRGB24, sRGB24read)
-import qualified Data.Colour.Names as Color
 import Data.Curve hiding ((<.>))
 import Data.Curve.Util (mapT, foldT, zipT)
 import Data.Data hiding (typeOf)
@@ -24,7 +18,7 @@ import Data.Generics.Aliases
 import Data.IntervalMap.FingerTree as IM
 import Data.IORef
 import Data.Label
-import Data.List (sort, findIndex, groupBy, sortBy, find)
+import Data.List (sort, findIndex, sortBy, find)
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
@@ -95,11 +89,13 @@ data State = State
 $(mkLabels [''Results, ''State])
 
 -- TODO: static import considerations
+sourceDir :: String
 sourceDir = "source"
 
+main :: IO ()
 main = do
   createDirectoryIfMissing False sourceDir
-  chan <- startGHCiServer (Options [sourceDir]) print print
+  chan <- startGHCiServer [sourceDir] print print
   (stateRef, loop) <- runToyState $ Toy
     { initialState =
         State "fibs = 0 : 1 : zipWith (+) fibs (tail fibs)"
@@ -112,8 +108,10 @@ main = do
   modifyIORefM stateRef (secondM (setTimeout . set selfRef stateRef))
   loop
 
+updateTime :: Int
 updateTime = 200
 
+setTimeout :: State -> IO State
 setTimeout s = do
   case get timeout s of
     0 -> return ()
@@ -127,9 +125,11 @@ setTimeout s = do
     writeIORef ref (km, st')
     return False
 
+keyHeld :: String -> State -> IO Bool
 keyHeld key = liftM (maybe False (\(a,_,_)->a) . (M.lookup key) . fst)
             . readIORef . get selfRef
 
+eitherHeld :: [Char] -> State -> IO Bool
 eitherHeld key s = do
   l <- keyHeld (key ++ "_L") s
   r <- keyHeld (key ++ "_R") s
@@ -137,7 +137,7 @@ eitherHeld key s = do
 
 addClip :: String -> State -> IO State
 addClip x s = getType (get chan s) x
-          >>= \(t,_) -> return $ modify clips ((x, t):) s
+          >>= \t -> return $ modify clips ((x, rightToMaybe t):) s
 
 getSelection :: State -> String
 getSelection s = substr (get cursor s) (get code s)
@@ -362,6 +362,7 @@ allIvls :: Apps -> [(Ivl, Ivl)]
 allIvls = onubSortBy snd
         . concatMap (\(a, b, xs) -> (a, b) : map (\x -> (x, x)) xs)
 
+shapes :: [C.Render DRect]
 shapes = zipWith (\c -> (setColor c >>)) colours
   [ drawShape (\p -> C.arc (fst p) (snd p) 3 0 (2 * pi))
   , drawPoly 3 q
@@ -373,7 +374,6 @@ shapes = zipWith (\c -> (setColor c >>)) colours
  where
   q = pi / 2
   drawShape s = do
-    C.getCurrentPoint
     p <- liftM (^+^ (3, 0)) C.getCurrentPoint
     s p
     C.fill
@@ -386,10 +386,10 @@ shapes = zipWith (\c -> (setColor c >>)) colours
     mapM_ (uncurry C.lineTo) xs)
 
 drawTypes :: [C.Render DRect] -> DPoint -> TaskChan -> Results -> C.Render ()
-drawTypes shapes pos c (Results txt ftxt _ apps tm tc es) = do
+drawTypes shs pos c (Results txt ftxt _ apps tm tc es) = do
   let prims = onub . sort . map (trim . prettyPrint . cannonicalType)
             . concatMap splitType $ M.elems tm
-      cmap = M.fromList $ zip prims shapes
+      cmap = M.fromList $ zip prims shs
   mapM_ (drawType cmap) (M.toList tm) {- ( catMaybes
                         . map (\(i1, i2) -> liftM (i1,) $ M.lookup i2 tm)
                         $ allIvls apps ) -}
@@ -429,12 +429,12 @@ drawTypes shapes pos c (Results txt ftxt _ apps tm tc es) = do
         Just s -> s
         Nothing -> fallback t
     fallback t = do
-      let txt = trim $ prettyPrint t
+      let typ = trim $ prettyPrint t
       setColor ((1.0, 1.0, 1.0) :: DColor)
-      sz <- textSize txt
+      sz <- textSize typ
       fr <- C.getCurrentPoint
       relMove (0, snd sz / 2)
-      C.showText txt
+      C.showText typ
       return $ boundPoints [fr, fr ^+^ (fst sz, 0)]
 
 drawGaps :: DPoint -> Results -> C.Render ()
@@ -572,18 +572,18 @@ getApps = uncurry (++) . processExp
  where
   processExp :: ExpS -> (Apps, Apps)
   processExp (A.InfixApp s l o r) = case o of
-    (A.QVarOp _ (A.UnQual _ (A.Symbol _ "."))) -> doApp s [l, r]
-    (A.QVarOp _ (A.UnQual _ (A.Symbol _ "$"))) -> doApp s [l, r]
-    _                                          -> doApp s [convertOp o, l, r]
-  processExp (A.LeftSection s l o)  = doApp s [convertOp o, l]
-  processExp (A.RightSection s o r) = doApp s [convertOp o, r] --TODO: uhhh
-  processExp (A.App s l r)          = doApp s [l, r]
+    (A.QVarOp _ (A.UnQual _ (A.Symbol _ "."))) -> doApp s l [r]
+    (A.QVarOp _ (A.UnQual _ (A.Symbol _ "$"))) -> doApp s l [r]
+    _                                          -> doApp s (convertOp o) [l, r]
+  processExp (A.LeftSection s l o)  = doApp s (convertOp o) [l]
+  processExp (A.RightSection s o r) = doApp s (convertOp o) [r] --TODO: uhhh
+  processExp (A.App s l r)          = doApp s l [r]
   processExp e = foldr1 (zipT (++))
                $ gmapQ (const ([], []) `extQ`
                  (first (map $ second3 $ const (getSpan' e)) . processExp)) e
-  doApp :: A.SrcSpanInfo -> [ExpS] -> (Apps, Apps)
-  doApp s es@(x:xs) = ( [(getSpan' x, colSpan $ A.srcInfoSpan s, map getSpan' xs)]
-                      , concatMap getApps es )
+  doApp :: A.SrcSpanInfo -> ExpS -> [ExpS] -> (Apps, Apps)
+  doApp s x xs = ( [(getSpan' x, colSpan $ A.srcInfoSpan s, map getSpan' xs)]
+                 , concatMap getApps (x:xs) )
   convertOp :: A.QOp A.SrcSpanInfo -> ExpS
   convertOp (A.QVarOp s' qn) = A.Var s' qn
   convertOp (A.QConOp s' qn) = A.Con s' qn
@@ -611,13 +611,17 @@ getType _ t = I.runInterpreter $ do
   I.typeOf t
 -}
 
+gapChar :: Char
 gapChar = '\x180E'
 
-getType c t = interpret c "MyMain" . liftM Just . typeOf $ deMongol t
+getType :: TaskChan -> String -> IO (Either I.InterpreterError String)
+getType c t = interpret c "MyMain" . Simple.typeOf $ deMongol t
 
+preferOk :: ParseResult a -> Maybe a
 preferOk = rightToMaybe . parseResultToEither
 
 -- Actually unecessary
+deMongol :: [Char] -> [Char]
 deMongol = map (\c -> if c == gapChar then ' ' else c)
 
 -- TODO: this needs to pass in declaration parameters
@@ -625,15 +629,15 @@ deMongol = map (\c -> if c == gapChar then ' ' else c)
 getTypeMap :: String -> TaskChan -> Apps -> IO TypeMap
 getTypeMap txt c apps = do
   res <- getType c . recText1 $ words txt !! 0
-  let rec = isJust . fst $ res
-  mapM_ (print . showSDoc . thd3) $ snd res
+  let rec = isRight res
+  print rec
   fs <- mapM (getExpr rec . fst3) apps
   ps <- mapM (mapM (getExpr rec) . thd3) apps
   return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
  where
   getExpr :: Bool -> Ivl -> IO (Maybe (Ivl, Type))
   getExpr rec ivl
-    = liftM (\(t,_) -> t >>= (liftM (ivl,) . preferOk . parseType))
+    = liftM (\t -> rightToMaybe t >>= liftM (ivl,) . preferOk . parseType)
     . getType c . (if rec then recText2 ivl else id) $ "(" ++ substr ivl txt ++ ")"
   recText1 x = "let {" ++ txt ++ "} in " ++ x
   recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
@@ -653,6 +657,7 @@ colours = cycle $ map readColor
   , "e7f6da"
   ]
 
+readColor :: String -> (Int, Int, Int)
 readColor = toIColor . toSRGB24 . sRGB24read
 
 --toIColor :: RGB Double -> (Int, Int, Int)

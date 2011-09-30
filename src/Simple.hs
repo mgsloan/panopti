@@ -5,11 +5,14 @@ module Simple
     , startGHCiServer
     , restartGHCiServer
     , interpret
-    , catchError_fixed
+    , typeOf
     ) where
 
 -- GHC
-import Language.Haskell.Interpreter hiding (interpret)
+import Hint.Base
+import Hint.Compat
+import Hint.Conversions
+import Language.Haskell.Interpreter hiding (interpret, typeOf)
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar, tryPutMVar)
@@ -19,6 +22,7 @@ import Control.Monad (when, forever)
 import Control.Monad.Error (MonadError, catchError)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
+import Data.Maybe (fromJust)
 import Prelude hiding (catch)
 
 -------------------------
@@ -32,7 +36,7 @@ newtype TaskChan
 ---------------
 
 startGHCiServer :: [String] -> (String -> IO ()) -> (String -> IO ()) -> IO TaskChan
-startGHCiServer paths filepath modul logError logMsg = do
+startGHCiServer paths logError logMsg = do
     ch <- newChan 
     ref <- newIORef (const $ return ())
 
@@ -73,7 +77,7 @@ startGHCiServer paths filepath modul logError logMsg = do
             x <- m
             return (True, Right x)
 
-          `catchError_fixed` \er ->
+          `catchError` \er ->
             return (not $ fatal er, Left er)
 
         lift $ putMVar repVar res
@@ -91,28 +95,13 @@ interpret (TC ch) fn m = do
     writeChan ch $ Just $ Task fn rep m
     takeMVar rep
 
-
-
+typeOf :: String -> Interpreter String
+typeOf xs = do
+  --failOnParseError parseExpr xs
+  ty <- runGhc1 exprType xs
+  fromGhcRep $ fromJust ty
 
 fatal :: InterpreterError -> Bool
 fatal (WontCompile _) = False
 fatal (NotAllowed _)  = False
 fatal _ = True
-
-catchError_fixed 
-    :: MonadError InterpreterError m 
-    => m a -> (InterpreterError -> m a) -> m a
-m `catchError_fixed` f = m `catchError` (f . fixError)
-  where
-    fixError (UnknownError s) 
-        | Just x <- dropPrefix "GHC returned a result but said: [GhcError {errMsg =" s
-        = WontCompile [GhcError {errMsg = case reads x of ((y,_):_) -> y; _ -> s}]
-    fixError x = x
-
-dropPrefix :: Eq a => [a] -> [a] -> Maybe [a]
-dropPrefix s m
-    | s `isPrefixOf` m = Just $ drop (length s) m
-    | otherwise = Nothing
-
-
-
