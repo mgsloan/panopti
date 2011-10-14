@@ -87,6 +87,7 @@ executable sinu
                      rex,
                      mtl,
                      old-time,
+                     rounding,
                      syb,
                      template-haskell,
                      toyframework,

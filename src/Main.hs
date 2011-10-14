@@ -13,6 +13,8 @@ import Data.Char (toLower)
 import Data.Colour.SRGB (channelRed, channelGreen, channelBlue, toSRGB24, sRGB24read)
 import Data.Curve hiding ((<.>))
 import Data.Curve.Util (mapT, foldT, zipT)
+import Data.Curve.Interval ((...))
+import qualified Data.Curve.Interval as Curve
 import Data.Data hiding (typeOf)
 import Data.Generics.Aliases
 import Data.IntervalMap.FingerTree as IM
@@ -29,7 +31,9 @@ import Language.Haskell.Exts (prettyPrint, Type(..), ParseResult(..), SrcLoc(..)
 import qualified Language.Haskell.Exts.Annotated as A
 import qualified Language.Haskell.Interpreter as I
 import qualified System.Glib.MainLoop as G
+import Numeric.Rounding (Precision)
 import System.Directory (createDirectoryIfMissing)
+import System.IO.Unsafe (unsafeInterleaveIO)
 
 {- Things to work on
 
@@ -64,7 +68,7 @@ type Edit = (Ivl, String)
 data Results = Results
   { _source :: String 
   , _partial_source :: String
-  , _decl :: A.Decl A.SrcSpanInfo
+  , _decl :: ExpS
   , _appIvls :: Apps
   , _typeMap :: TypeMap
   , _colorMap :: ColorMap
@@ -98,7 +102,8 @@ main = do
   chan <- startGHCiServer [sourceDir] print print
   (stateRef, loop) <- runToyState $ Toy
     { initialState =
-        State "fibs = 0 : 1 : zipWith (+) fibs (tail fibs)"
+  --      State "fibs = 0 : 1 : zipWith (+) fibs (tail fibs)"
+        State "map (+1) . map (*2) $ (filter isSpace $ tail \"hello world\")"
               0 Normal Nothing chan (0, 220) 0 undefined [] []
     , mouse   = const $ setM mouseCursor
     , key     = handleKey'
@@ -154,7 +159,8 @@ editCode es s = modify code (applyEdits $ debug es)
  where
   curs = get cursor s
   curs' = mapT (offset+) curs
-  offset = sum . map (\(ivl, xs) -> length xs - ivlWidth ivl) $ debug $ takeWhile ((<= curs) . fst) $ debug es
+  offset = sum . map (\(ivl, xs) -> length xs - ivlWidth ivl) 
+         $ debug $ takeWhile ((<= curs) . fst) $ debug es
 
 --parentOfSpan :: (Data a) => Ivl -> a -> Maybe (ExpS, Int)
 
@@ -309,8 +315,8 @@ handleDisplay _ (tl, br) s@(State txt ix user p c (_, ypos) _ _ _ _) = do
   C.fill
   
   let pos = textPos ^-^ (0, 25)
---  whenJust p (\t -> drawTypes shapes pos c t >> drawGaps pos t)
-  whenJust p (\t -> drawApps pos c t >> drawGaps pos t)
+  whenJust p (\t -> drawTypes shapes pos c t >> drawGaps pos t)
+--  whenJust p (\t -> drawApps pos c t >> drawGaps pos t)
 
   -- Draw text
   setColor $ readColor "f6f3e8"
@@ -341,7 +347,7 @@ getHeight (_, y) (f, t) = minimum . (y:) . map snd . intersections (IM.Interval 
 drawLTR :: (a -> C.Render DRect) -> [a] -> C.Render DRect
 drawLTR f = liftM (foldl1 Data.Curve.union)
           . mapM (\x -> do
-              r <- f x
+              r <- liftM (expandR (4, 0)) $ f x
               move $ rside 1 r `at` 0.5
               return r)
 
@@ -354,7 +360,7 @@ surround pre post r = do
   let to = (rside 1 r `at` 0.5) ^+^ (second (/2) psz)
   move $ to ^-^ (fst psz, 0)
   C.showText post
-  return $ boundPoints [from, to] `Data.Curve.union` r
+  return . expandR (3, 0) $ boundPoints [from, to] `Data.Curve.union` r
 
 -- TODO: consider writing Type information into application tree?
 
@@ -377,7 +383,8 @@ shapes = zipWith (\c -> (setColor c >>)) colours
     p <- liftM (^+^ (3, 0)) C.getCurrentPoint
     s p
     C.fill
-    return $ boundPoints [p ^+^ (3, 0), p ^+^ (0, 3), p ^-^ (0, 3), p ^-^ (3, 0)]
+    return . expandR (1, 0)
+           $ boundPoints [p ^+^ (3, 0), p ^+^ (0, 3), p ^-^ (0, 3), p ^-^ (3, 0)]
   drawPoly :: Int -> Double -> C.Render DRect
   drawPoly c r = drawShape (\pnt -> do
     let cnt = fromIntegral c
@@ -385,23 +392,38 @@ shapes = zipWith (\c -> (setColor c >>)) colours
     move x
     mapM_ (uncurry C.lineTo) xs)
 
+type HeightMap2 = IM.IntervalMap Double Double
+
+getHeight2 :: Double -> Curve.Interval Double -> IM.IntervalMap Double Double -> Double
+getHeight2 y ivl = minimum . (y:) . map snd . intersections (cvtIvl ivl)
+
+cvtIvl :: (Precision a) => Curve.Interval a -> IM.Interval a
+cvtIvl ivl = IM.Interval (Curve.inf ivl) (Curve.sup ivl) 
+
 drawTypes :: [C.Render DRect] -> DPoint -> TaskChan -> Results -> C.Render ()
 drawTypes shs pos c (Results txt ftxt _ apps tm tc es) = do
   let prims = onub . sort . map (trim . prettyPrint . cannonicalType)
             . concatMap splitType $ M.elems tm
       cmap = M.fromList $ zip prims shs
-  mapM_ (drawType cmap) (M.toList tm) {- ( catMaybes
+  foldM_ (\h te -> liftM fst $ drawType cmap te h) IM.empty (M.toList tm)
+{- 
+  mapM_ (drawType cmap) (M.toList tm) ( catMaybes
                         . map (\(i1, i2) -> liftM (i1,) $ M.lookup i2 tm)
                         $ allIvls apps ) -}
   C.setFontSize 20
  where
-  drawType :: M.Map String (C.Render DRect) -> (Ivl, Type) -> C.Render DRect
-  drawType m (ivl, t) = do
+  drawType :: M.Map String (C.Render DRect) -> (Ivl, Type) -> HeightMap2
+           -> C.Render (HeightMap2, DRect)
+  drawType m (ivl, t) hm = do
     C.setFontSize 20
     sp <- spanLine txt ivl
     C.setFontSize 8
-    move $ pos ^+^ (5, 0) ^+^ sp `at` 0
-    rec [] t
+    let (x, y) = pos ^+^ (5, 0) ^+^ sp `at` 0
+        -- TODO: get width prediction
+        y' = getHeight2 y (x ... (x + 10)) hm
+    move (x, y')
+    result <- rec [] t
+    return (IM.insert (cvtIvl $ fst result) (subtract 10 $ Curve.inf $ snd result) hm, result)
    where
     rec :: Context -> Type -> C.Render DRect
     rec ctx t@(TyFun _ _) = do
@@ -411,7 +433,7 @@ drawTypes shs pos c (Results txt ftxt _ apps tm tc es) = do
       draw line
       drawArrow 4 1 0.8 line
       C.stroke
-      return rect
+      return $ expandR (5, 0) rect
     rec ctx (TyTuple _ xs) = do
       rect <- drawLTR (rec ctx) xs
       setColor ((1.0, 1.0, 1.0) :: DColor)
@@ -430,12 +452,13 @@ drawTypes shs pos c (Results txt ftxt _ apps tm tc es) = do
         Nothing -> fallback t
     fallback t = do
       let typ = trim $ prettyPrint t
+--      C.liftIO $ print typ
       setColor ((1.0, 1.0, 1.0) :: DColor)
       sz <- textSize typ
       fr <- C.getCurrentPoint
       relMove (0, snd sz / 2)
       C.showText typ
-      return $ boundPoints [fr, fr ^+^ (fst sz, 0)]
+      return $ expandR (2, 0) $ boundPoints [fr, fr ^+^ (fst sz, 0)]
 
 drawGaps :: DPoint -> Results -> C.Render ()
 drawGaps p r = mapM_ drawGap . map (mapT fst . (head &&& last))
@@ -521,15 +544,21 @@ collate :: (Data a, Typeable b) => (b -> [c]) -> a -> [c]
 collate f = concat . gmapQ (collate f `extQ` f)
 
 update :: State -> IO State
-update s = (parsed' $ partialParse A.parseDecl txt) >>= flip (setM parsed) s
+update s = (parsed' $ partialParse A.parseExp txt) >>= flip (setM parsed) s
  where
   txt = get code s 
-  parsed' (Just (decl, txt', errs)) = do
-    let apps = concatApps $ collate getApps decl
+  parsed' (Just (expr, txt', errs)) = do
+    let apps = concatApps $ collate getApps expr
     tm <- getTypeMap txt' (get chan s) apps
 --    mapM (print . (`atSpan` decl)) $ M.keys tm
     let tc = getColorMap tm apps
-    return (Just $ Results txt txt' decl apps tm tc errs)
+    let w = whereify expr
+    print "start"
+--    tsub <- getTopSubset (second declMap w) (get chan s)
+    tsub <- getSubsets w (get chan s)
+    mapM(\subs -> putStrLn "==" 
+               >> mapM (\(a, b) -> putStrLn $ prettyPrint a ++ "\n" ++ prettyPrint b) subs) tsub
+    return (Just $ Results txt txt' expr apps tm tc errs)
   parsed' Nothing = return Nothing
 
 
@@ -566,6 +595,22 @@ partialParse f txt = rec Nothing txt
 imFromList :: (Ord a) => [(IM.Interval a, b)] -> IM.IntervalMap a b
 imFromList = foldl (\m p -> (uncurry IM.insert) p m) IM.empty
 
+type Names = [NameS]
+
+{-
+whereify :: ExpS -> ExpS
+whereify = rec [UnQual sp (Ident name) | name <- ['a'..'z']]
+ where
+  sp = undefined
+  rec :: [Names] -> ExpS -> (ExpS, [Decl SrcSpanInfo], [Names])
+  rec (n:ns) (Lambda _ ps e)
+    = ( Var sp n
+      , FunBind sp [Match sp n ps . Just $ BDecls sp ds]
+      , ns')
+   where
+    (v, ds, ns') = rec ns e
+  rec (n:ns) e = gmapQ (rec 
+-}    
 
 getApps :: ExpS -> Apps
 getApps = uncurry (++) . processExp
@@ -617,8 +662,10 @@ gapChar = '\x180E'
 getType :: TaskChan -> String -> IO (Either I.InterpreterError String)
 getType c t = interpret c "MyMain" . Simple.typeOf $ deMongol t
 
-preferOk :: ParseResult a -> Maybe a
-preferOk = rightToMaybe . parseResultToEither
+{-
+getFuncType :: TaskChan -> String -> String -> IO (Either I.InterpreterError String)
+getFuncType c d n = interpret c "MyMain" . (Simple.typeOf n)
+-}
 
 -- Actually unecessary
 deMongol :: [Char] -> [Char]
@@ -630,7 +677,7 @@ getTypeMap :: String -> TaskChan -> Apps -> IO TypeMap
 getTypeMap txt c apps = do
   res <- getType c . recText1 $ words txt !! 0
   let rec = isRight res
-  print rec
+  --print rec
   fs <- mapM (getExpr rec . fst3) apps
   ps <- mapM (mapM (getExpr rec) . thd3) apps
   return . M.fromList . map (second cannonicalType) . catMaybes $ fs ++ concat ps
@@ -642,6 +689,62 @@ getTypeMap txt c apps = do
   recText1 x = "let {" ++ txt ++ "} in " ++ x
   recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
 
+-- This is the seminal approach
+getTopSubset :: (ExpS, DeclMap) -> TaskChan -> IO [[(DeclS, Type)]]
+getTopSubset (top, dm) chan 
+  = maybe (return []) (\d -> do
+      results <- derefChildren d
+      case results of
+        [] -> liftM maybeToList . getTypes $ M.elems dm
+        xs -> return xs)
+  $ M.lookup (head . getVars $ top) dm
+ where
+  getTypes :: [DeclS] -> IO (Maybe [(DeclS, Type)])
+  getTypes decls = do
+    let ppr = A.prettyPrint . twhered "foo" $ (top, decls)
+    typ <- getType chan ppr
+    case typ of
+      Left err -> return Nothing
+      Right typeStr ->
+        case processType $ parseType typeStr of
+          Just xs -> return . Just $ zip decls xs
+          _ -> return $ Just []
+
+  derefChildren = liftM concat
+                . mapM (derefNode . (id &&& (`M.lookup` dm)))
+                . declChildVars
+
+  derefNode :: (String, Maybe DeclS) -> IO [[(DeclS, Type)]]
+  derefNode (_, Nothing) = return []
+  derefNode (n, Just d) = do
+    ts <- getTypes . map snd . undefDecls [n] $ M.toList dm
+    case ts of
+      Just xs -> do
+        results <- derefChildren d
+        return (if null results then [xs] else results)
+      Nothing -> return []
+
+  processType (ParseOk (TyTuple _ xs)) = Just xs
+  processType (ParseOk (TyForall bnds ctx t)) = liftM (map $ addCtx ctx)
+                                              $ processType (ParseOk t)
+  processType (ParseOk t) = Just [t]
+  processType _ = Nothing
+
+getSubsets :: (ExpS, [DeclS]) -> TaskChan -> IO [[(DeclS, Type)]]
+getSubsets p@(top, ds) chan = recurse (top, declMap ds)
+ where
+  recurse arg@(_, dm) = do
+    --putStrLn $ unlines . map prettyPrint $ M.elems dm
+    results <- getTopSubset arg chan
+    if null results
+      then return []
+      else do
+        let xs = head results
+            dm' = foldr M.delete dm $ map (funName . fst) xs
+        liftM ((xs:) . concat) 
+          . mapM (recurse . (,dm') . mkPlain . fst)
+          . filter ((== 0) . length . (`declChildren` dm') . snd)
+          $ M.toList dm'
 
 getColorMap :: TypeMap -> Apps -> ColorMap
 getColorMap tm = M.fromList . (`zip` colours)

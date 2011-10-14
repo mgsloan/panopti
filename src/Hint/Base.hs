@@ -138,11 +138,10 @@ data SessionData a = SessionData {
                        ghcErrLogger    :: GhcErrLogger
                      }
 
-newtype GhcError = GhcError (GHC.Severity, GHC.SrcSpan, GHC.Message)
+newtype GhcError = GhcError (GHC.Severity, [GHC.SrcSpan], String, String)
 
 instance Show GhcError where
-  show (GhcError (_, s, m)) = GHC.showSDoc $ GHC.mkLocMessage s m
-  
+  show (GhcError (_, _, a, b)) = a ++ " " ++ b
 
 mapGhcExceptions :: MonadInterpreter m
                  => (String -> InterpreterError)

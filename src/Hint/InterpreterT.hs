@@ -28,9 +28,8 @@ import Data.Maybe
 import Data.Dynamic
 #endif
 
-import Debug.Trace
-
 import qualified GHC.Paths
+
 
 import qualified ErrUtils as GHC
 import qualified SrcLoc as GHC
@@ -83,8 +82,6 @@ execute s = GHC.runGhcT (Just GHC.Paths.libdir)
 instance MonadTrans InterpreterT where
     lift = InterpreterT . lift . lift . lift
 
-debug x = trace (show x) x
-
 runGhc_impl :: (MonadCatchIO m, Functor m) => RunGhc (InterpreterT m) a
 runGhc_impl a = InterpreterT (lift (lift a))
                 `catches`
@@ -94,20 +91,29 @@ runGhc_impl a = InterpreterT (lift (lift a))
     where rethrowGE = throwError . GhcException
           rethrowWC = throwError
                     . WontCompile
-                    . map (makeSimpleError . show)
-                    . debug
+                    . map (makeError GHC.SevError)
                     . GHC.bagToList
                     . GHC.srcErrorMessages
 
 #endif
 
+makeError :: GHC.Severity -> GHC.ErrMsg -> GhcError
+makeError sev err = GhcError 
+  ( sev
+  , GHC.errMsgSpans err
+  , GHC.showSDoc $ GHC.errMsgShortDoc err
+  , GHC.showSDoc $ GHC.errMsgExtraInfo err
+  )
+
+{-
 makeSimpleError :: String -> GhcError
 makeSimpleError e = GhcError $
   ( GHC.SevFatal
-  , span
+  , []
   , GHC.errMsgShortDoc $ GHC.mkPlainErrMsg span (GHC.text $ "GHCi server died:" ++ e))
  where
   span = GHC.mkGeneralSrcSpan (GHC.fsLit "")
+-}
 
 showGhcEx :: GHC.GhcException -> String
 showGhcEx = flip GHC.showGhcException ""
@@ -226,7 +232,8 @@ newSessionData  a =
        }
 
 mkLogHandler :: IORef [GhcError] -> GhcErrLogger
-mkLogHandler r sev src style msg = modifyIORef r (GhcError (sev, src, msg) :)
+mkLogHandler r sev src _ msg 
+  = modifyIORef r (GhcError (sev, [src], GHC.showSDoc msg, ""):)
 
 -- The MonadInterpreter instance
 
