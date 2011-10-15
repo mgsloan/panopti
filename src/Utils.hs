@@ -7,6 +7,7 @@ module Utils where
 -- import Control.Applicative (liftA2, pure, (<*>))
 
 import Control.Arrow ((***), (&&&), first, second)
+import Control.Category ((.))
 import Control.Concurrent.MVar
 import Control.Monad (liftM, msum)
 import qualified Control.Monad.State as ST
@@ -29,6 +30,7 @@ import Language.Haskell.Exts.Lexer
 import Language.Haskell.Exts.ParseMonad
 import Language.Haskell.Exts.SrcLoc
 import Language.Haskell.TH.Quote
+import Prelude hiding ((.))
 import qualified Text.Regex.PCRE.Rex as PCRE
 -- import qualified Text.Regex.PCRE.Light as PCRE
 
@@ -36,7 +38,7 @@ import qualified Text.Regex.PCRE.Rex as PCRE
 -------------------------------------------------------------------------------
 
 rex :: QuasiQuoter
-rex = PCRE.makeQuasiMultiline $ PCRE.rexConf False True "id" [] []
+rex = PCRE.makeQuasiMultiline $ PCRE.rexConf False False "id" [] []
 
 modM :: Monad m => (b :-> a) -> (a -> a) -> b -> m b
 modM l f = return . modify l f
@@ -49,6 +51,12 @@ lensed l l' f s = set l' (f $ get l s) s
 
 maybeLens :: Maybe a :-> a
 maybeLens = lens (fromJust) (\v _ -> Just v)
+
+headLens :: [a] :-> a
+headLens = lens head setHead
+  where
+   setHead x [] = [x]
+   setHead x (_:xs) = x : xs
 
 modifyIORefM :: IORef a -> (a -> IO a) -> IO ()
 modifyIORefM r f = readIORef r >>= f >>= writeIORef r
@@ -225,19 +233,20 @@ buildApp = helper . reverse
   helper [x] = x
   helper (x:xs) = A.App sp (buildApp xs) x
 
-twhered :: String -> (ExpS, [DeclS]) -> ExpS
-twhered n (_, funcs) 
+twhered :: [DeclS] -> ExpS
+twhered funcs
   = A.Let sp (A.BDecls sp funcs)
-  $ A.Tuple sp (map (mkPlain . funName) funcs)
+  $ A.Tuple sp (map (mkPlain . get funName) funcs)
 
-dwhered :: String -> (ExpS, [DeclS]) -> ExpS
-dwhered n (e, funcs) = A.Let sp (A.BDecls sp funcs) e
+dwhered :: (ExpS, [DeclS]) -> ExpS
+dwhered (e, funcs) = A.Let sp (A.BDecls sp funcs) e
 
 mutate :: ST.MonadState s m => (s -> s) -> m s
 mutate f = do
   x <- ST.get
   ST.put (f x)
   return x
+
 
 type WST = ST.State ([String], [DeclS])
 
@@ -278,21 +287,49 @@ unPlain (A.Var _ (A.UnQual _ (A.Ident _ n))) = n
 mkPlain :: String -> ExpS
 mkPlain n = (A.Var sp (A.UnQual sp (A.Ident sp n)))
 
-funName :: DeclS -> String
-funName (A.FunBind _ ((A.Match _ (A.Ident _ n) _ _ _):_)) = n
+mkFun :: String -> ExpS -> DeclS
+mkFun n e = A.FunBind (A.ann e)
+  [ A.Match sp (A.Ident sp n) [] (A.UnGuardedRhs sp e) Nothing ]
 
+matchName :: MatchS :-> String
+matchName = lens getName setName
+ where
+  getName (A.Match _ (A.Ident _ n) _ _ _) = n
+  setName n (A.Match b (A.Ident c _) d e f) = A.Match b (A.Ident c n) d e f
+
+matchExpr :: MatchS :-> ExpS
+matchExpr = lens getExpr setExpr
+ where
+  getExpr (A.Match _ _ _ (A.UnGuardedRhs _ e) _ ) = e
+  setExpr f (A.Match a c d (A.UnGuardedRhs b _) e) =
+            (A.Match a c d (A.UnGuardedRhs a f) e)
+
+funMatches :: DeclS :-> [MatchS]
+funMatches = lens getMatches setMatches
+ where
+  getMatches (A.FunBind _ ms) = ms
+  setMatches ms (A.FunBind a _) = A.FunBind a ms
+
+funName :: DeclS :-> String
+funName = lens getName setName . funMatches
+ where
+  getName ((A.Match _ (A.Ident _ n) _ _ _):_) = n
+  setName n = map (\(A.Match a (A.Ident b _) c d e) ->
+                     A.Match a (A.Ident b n) c d e)
 
 funExpr :: DeclS :-> ExpS
-funExpr = lens getExpr setExpr
+funExpr = matchExpr . headLens . funMatches
+
+letBinds :: ExpS :-> [DeclS]
+letBinds = lens getBinds setBinds
  where
-  getExpr (A.FunBind _ ((A.Match _ _ _ (A.UnGuardedRhs _ e) _):_)) = e
-  setExpr e (A.FunBind a ((A.Match b c d (A.UnGuardedRhs z _) f):g)) =
-            (A.FunBind a ((A.Match b c d (A.UnGuardedRhs z e) f):g))
+  getBinds (A.Let _ (A.BDecls _ xs) _) = xs
+  setBinds xs (A.Let a (A.BDecls b _) c) = A.Let a (A.BDecls b xs) c
 
 type DeclMap = M.Map String DeclS
 
 declMap :: [DeclS] -> DeclMap
-declMap = M.fromList . map (funName &&& id)
+declMap = M.fromList . map (get funName &&& id)
 
 declChildVars :: DeclS -> [String]
 declChildVars = filter (isPrefixOf "__") . freeEVars . get funExpr
@@ -302,8 +339,9 @@ declChildren d m = catMaybes . map (`M.lookup` m) $ declChildVars d
 
 -- TODO: More efficient impl?
 declParents :: DeclS -> DeclMap -> [DeclS]
-declParents d = filter (elem (funName d). declChildVars) . M.elems
+declParents d = filter (elem (get funName d). declChildVars) . M.elems
 
+-- Substitute each found instance of the (first, ) with the ( , second)
 substExpr :: forall a. Data a
           => [(ExpS, ExpS)] -> a -> a
 substExpr subs = gmapT (substExpr subs) `extT` doExp
@@ -312,93 +350,20 @@ substExpr subs = gmapT (substExpr subs) `extT` doExp
   doExp (getMatches -> (x:_)) = x
   doExp x = gmapT (substExpr subs) x
 
--- Substitute the given
 
 -- Recursively substitute the given expression subtrees with undefined
 undefDecls :: [String] -> [(String, DeclS)] -> [(String, DeclS)]
 undefDecls [] ys = ys
 undefDecls xs ys = undefDecls (concatMap (declChildVars . snd) removed)
                  . substExpr (map ((, mkPlain "undefined") . mkPlain) xs)
-                 -- . trace (show $ (map (funName . snd) derefed, map (funName .  snd) remaining))
                  $ remaining
  where
   (removed, remaining) = partition ((`elem` xs) . fst) ys
   
-
 funcAsExp :: DeclS -> ExpS
-funcAsExp d = A.Let sp (A.BDecls sp [d]) (mkPlain $ funName d)
+funcAsExp d = A.Let sp (A.BDecls sp [d]) (mkPlain $ get funName d)
 
 {-
-data DeclTree = DeclTree
-  { dtVar :: A.Exp A.SrcSpanInfo
-  , dtDecl :: DeclS
-  , dtSpan :: SrcSpan
-  , dtChildren :: [DeclTree]
-  }
-
-treeWhered :: (ExpS, [(DeclS, SrcSpan)]) -> Maybe DeclTree
-treeWhered (v, xs) = mkTree (unPlain v)
- where
-  m = declMap xs
-  mkTree n = do
-    (decl, span) <- M.lookup n m
-    return . DeclTree (mkPlain n) decl span
-           $ catMaybes . map mkTree . filter (startsWith "__") $ freeEVars decl)
-
-wheredTree :: DeclTree -> (ExpS, [(DeclS, SrcSpan)]
-wheredTree (DeclTree v decl span xs) =
-  (v, (decl, span) : concatMap (snd .  wheredTree) xs)
--}
-
-
---getWDeps  =
-
-{- 
-data DeclTree = DeclTree 
-  { dtVar :: A.Exp A.SrcSpanInfo
-  , dtDecl :: Maybe DeclS
-  , dtChildren :: [DeclTree]
-  }
-
-whereify :: ExpS -> DeclTree
-whereify top = ST.evalState (rec top) manyNames
- where
-  rec :: ExpS -> ST.State [String] DeclTree
-  rec (A.Lambda _ ps e) = do
-    dt <- rec e
-    decl ps (catMaybes . map dtDecl $ dtChildren dt) [] $ dtVar dt
-  rec e@(A.App _ _ _) = do
-    dts <- mapM rec $ decompApp e
-    decl [] [] [] $ buildApp $ map dtVar dts
-  rec v@(A.Var _ _) = return (DeclTree v Nothing [])
-  rec e = decl [] [] [] =<< grec e
-
-  grec :: forall a . Data a => a -> ST.State [String] a
-  grec = gmapM (grec `extM` rec)
-
-  decl :: [PatS] -> [DeclS] -> [DeclTree] -> ExpS -> ST.State [String] DeclTree
-  decl ps bs ds v = do
-    (n:ns) <- ST.get
-    ST.put ns
-    return $ DeclTree (mkPlain n)),
-      Just $ A.FunBind sp [A.Match sp (A.Ident sp n) ps $ A.UnGuardedRhs sp 
-        (case bs of
-          [] ->
-          _ -> A.Let sp (A.BDecls sp bs) v)]) ds
--}
-
---findSubset :: 
-
-{- TODO: the denester will have to deal with all kinds of scopinmg issues.
-  The main problem is extracting functions which reference variables which get
-  shadowed before the invocation.
-
-deNest :: (DeclS -> Bool) -> DeclS -> DeclS
-deNest f = 
--}
-
-{-
-
 Ok, here's the procedure:
 
  1) Set the whole top-level declaration to 'undefined', in order to get the
@@ -411,9 +376,7 @@ Ok, here's the procedure:
    " __a = x; __b = x; __c = if undefined then __a else __b"
 
  4) Use iterative application of the seminal top-down-removal scheme
-
 -}
-
 
 type STT = ST.State (String, M.Map String Char)
 
@@ -462,6 +425,18 @@ cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
     return $ TyForall (liftM (map snd) bs) cx t'
   doType t = gmapM rec t
 
+-- Throws away top foralls
+-- TODO: shadow nested foralls
+specializeTypes :: M.Map String Type -> Type -> Type
+specializeTypes m (TyForall _ _ t) = specializeTypes m t
+specializeTypes m t = rec t
+ where
+  rec :: (Data a) => a -> a
+  rec = gmapT rec `extT` doName
+  doName (TyVar (Ident  ((`M.lookup` m) -> Just t'))) = t'
+  doName (TyVar (Symbol ((`M.lookup` m) -> Just t'))) = t'
+  doName t = gmapT rec t
+
 splitFunc :: Type -> [Type]
 splitFunc ty = case ty of
     (TyForall bnds ctx t) -> rec t ctx
@@ -492,6 +467,13 @@ getVarA (A.Symbol _ n) = [n]
 
 getVars :: Data a => a -> [String]
 getVars = listAll (const [] `extQ` getVarA `extQ` getVar)
+
+deQual :: Data a => a -> a
+deQual = gmapT (deQual `extT` doA `extT` doE)
+ where
+  doA :: A.QName SrcSpanInfo-> A.QName SrcSpanInfo
+  doA (A.Qual s a b) = A.UnQual s b
+  doE (Qual a b) = UnQual b
 
 -- Free variables in the expression.
 freeEVars :: ExpS -> [String]
@@ -543,23 +525,7 @@ type ExpS = A.Exp A.SrcSpanInfo
 type DeclS = A.Decl A.SrcSpanInfo
 type NameS = A.Name A.SrcSpanInfo 
 type PatS = A.Pat A.SrcSpanInfo
-
-{-
-toExpList :: ExpS -> [ExpS]
-toExpList e = e : catMaybes (gmapQ ((const Nothing) `extQ` Just) e)
-
-fromExpList :: [ExpS] -> ExpS
-fromExpList (e:ps) = ST.evalState (gmapM ((return . id) `extM` setParam) e) ps
- where
-  setParam :: ExpS -> ST.State [ExpS] ExpS
-  setParam _ = do
-    (x:xs) <- ST.get
-    ST.put xs
-    return x
-
-mutateExpList :: ([ExpS] -> [ExpS]) -> ExpS -> ExpS
-mutateExpList f = fromExpList . f . toExpList
--}
+type MatchS = A.Match A.SrcSpanInfo
 
 lexify :: String -> ParseResult [Loc Token]
 lexify = runParserWithMode parseMode lexRec 

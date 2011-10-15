@@ -1,14 +1,15 @@
-{-# LANGUAGE DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell, TupleSections #-}
+{-# LANGUAGE DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell,
+TupleSections, ParallelListComp #-}
 
 import Simple
 import Utils
--- import ErrorParser
+import ErrorParser
 
 import Prelude hiding ((.))
 
 import Control.Arrow ((***), (&&&), first, second)
 import Control.Category ((.))
-import Control.Monad (liftM, zipWithM_, foldM, foldM_)
+import Control.Monad (liftM, zipWithM_, foldM, foldM_, when)
 import Data.Char (toLower)
 import Data.Colour.SRGB (channelRed, channelGreen, channelBlue, toSRGB24, sRGB24read)
 import Data.Curve hiding ((<.>))
@@ -20,7 +21,7 @@ import Data.Generics.Aliases
 import Data.IntervalMap.FingerTree as IM
 import Data.IORef
 import Data.Label
-import Data.List (sort, findIndex, sortBy, find)
+import Data.List (sort, findIndex, sortBy, find, (\\))
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
@@ -29,16 +30,17 @@ import Graphics.ToyFramework
 import qualified Graphics.Rendering.Cairo as C
 import Language.Haskell.Exts (prettyPrint, Type(..), ParseResult(..), SrcLoc(..), Context)
 import qualified Language.Haskell.Exts.Annotated as A
+import qualified Language.Haskell.Exts as E
 import qualified Language.Haskell.Interpreter as I
-import qualified System.Glib.MainLoop as G
 import Numeric.Rounding (Precision)
 import System.Directory (createDirectoryIfMissing)
+import System.FilePath
+import qualified System.Glib.MainLoop as G
 import System.IO.Unsafe (unsafeInterleaveIO)
 
 {- Things to work on
 
  * Fix partial parse
- * Parse type errors
  * Give type explanations
  * Make application structure manipulation system do the following:
    - Insert / remove parens when necessary / appropriate
@@ -549,15 +551,19 @@ update s = (parsed' $ partialParse A.parseExp txt) >>= flip (setM parsed) s
   txt = get code s 
   parsed' (Just (expr, txt', errs)) = do
     let apps = concatApps $ collate getApps expr
-    tm <- getTypeMap txt' (get chan s) apps
+--    tm <- getTypeMap txt' (get chan s) apps
 --    mapM (print . (`atSpan` decl)) $ M.keys tm
-    let tc = getColorMap tm apps
-    let w = whereify expr
     print "start"
 --    tsub <- getTopSubset (second declMap w) (get chan s)
+    let w = whereify expr
     tsub <- getSubsets w (get chan s)
     mapM(\subs -> putStrLn "==" 
                >> mapM (\(a, b) -> putStrLn $ prettyPrint a ++ "\n" ++ prettyPrint b) subs) tsub
+    let tm = if not $ null tsub
+             then subsetTypes $ head tsub
+             else M.empty
+    let tc = getColorMap tm apps
+    unifyTypes (head tsub) (get chan s)
     return (Just $ Results txt txt' expr apps tm tc errs)
   parsed' Nothing = return Nothing
 
@@ -651,7 +657,7 @@ getType c t = liftM (mapEither errParse id) . interpret c "MyMain" . I.typeOf $ 
 {-
 getType _ t = I.runInterpreter $ do
   I.set [I.searchPath I.:= ["source"]]
-  I.loadModules ["MyMain"]
+  I.loadnModules ["MyMain"]
   I.setTopLevelModules ["MyMain"]
   I.typeOf t
 -}
@@ -661,6 +667,15 @@ gapChar = '\x180E'
 
 getType :: TaskChan -> String -> IO (Either I.InterpreterError String)
 getType c t = interpret c "MyMain" . Simple.typeOf $ deMongol t
+
+interpretWith :: TaskChan -> String
+              -> I.Interpreter a -> IO (Either I.InterpreterError a)
+interpretWith c s f = do
+  writeFile (sourceDir </> "L" <.> "hs")
+    $ "{-# LANGUAGE TemplateHaskell, FlexibleContexts #-}\n"
+   ++ "module L where\nimport MyMain\n" ++ s ++ "\n"
+
+  interpret c "L" f
 
 {-
 getFuncType :: TaskChan -> String -> String -> IO (Either I.InterpreterError String)
@@ -689,6 +704,9 @@ getTypeMap txt c apps = do
   recText1 x = "let {" ++ txt ++ "} in " ++ x
   recText2 ivl x = "let {" ++ subst ivl "__e" txt ++ "; __e = " ++ x ++ "} in __e"
 
+subsetTypes :: [(DeclS, Type)] -> TypeMap
+subsetTypes = M.fromList . map (first getSpan')
+
 -- This is the seminal approach
 getTopSubset :: (ExpS, DeclMap) -> TaskChan -> IO [[(DeclS, Type)]]
 getTopSubset (top, dm) chan 
@@ -701,7 +719,7 @@ getTopSubset (top, dm) chan
  where
   getTypes :: [DeclS] -> IO (Maybe [(DeclS, Type)])
   getTypes decls = do
-    let ppr = A.prettyPrint . twhered "foo" $ (top, decls)
+    let ppr = A.prettyPrint $ twhered decls
     typ <- getType chan ppr
     case typ of
       Left err -> return Nothing
@@ -740,11 +758,65 @@ getSubsets p@(top, ds) chan = recurse (top, declMap ds)
       then return []
       else do
         let xs = head results
-            dm' = foldr M.delete dm $ map (funName . fst) xs
+            dm' = foldr M.delete dm $ map (get funName . fst) xs
         liftM ((xs:) . concat) 
           . mapM (recurse . (,dm') . mkPlain . fst)
           . filter ((== 0) . length . (`declChildren` dm') . snd)
           $ M.toList dm'
+
+-- Should be a better way to do this....
+annType = fromJust . preferOk . A.parse . prettyPrint
+
+data Resolution
+  = DataRes { resType :: Type }
+  | TypeRes { resType, targType :: Type }
+  | InstRes { resType :: Type }
+  deriving (Eq, Show, Ord)
+
+unifyTypes :: [(DeclS, Type)] -> TaskChan -> IO () -- IO [(DeclS, Type)]
+unifyTypes xs chan = rec . map DataRes $ M.elems tm
+ where
+  tm = M.fromList [ (t, E.TyCon . E.UnQual . E.Ident $ "T" ++ n)
+                  | t <- onubSortBy id $ concatMap (freeTVars . snd) xs
+                  | n <- manyNames ]
+
+  rec rs = do
+    print rs
+    typ <- interpretWith chan (base ++ mkDecls rs) (typeOf fname)
+    case typ of
+      Left (I.WontCompile xs) -> let rs' = concatMap resolve xs in
+        when (not $ null rs') $
+          rec $ rs' ++ (rs \\ [DataRes t | (TypeRes t _) <- rs'])
+      _ -> print typ
+
+  resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
+    TypeError (EqualityError a b _ _) _ ->
+      let dp = deQualL . fromJust . preferOk . parseType in
+      case (dp a, dp b) of
+        (Right a', Right b') -> if a < b then [TypeRes a' b'] else [TypeRes b' a']
+        (Left  a', Right b') -> [TypeRes b' a']
+        (Right a', Left  b') -> [TypeRes a' b']
+        _ -> []
+    TypeError (InstanceError a _) _ -> [InstRes (fromJust . preferOk $ parseType a)]
+    _ -> []
+
+  deQualL (TyCon (E.Qual (E.ModuleName "L") x)) = Right (TyCon $ E.UnQual x)
+  -- Temporary hack
+  deQualL (TyCon (E.Qual _ x)) = Left (TyCon $ E.UnQual x)
+  deQualL t = Left t
+
+  mkDecl (TypeRes t b) = "type " ++ A.prettyPrint t ++ " = " ++ A.prettyPrint b
+  mkDecl (DataRes t)   = "data " ++ A.prettyPrint t
+  mkDecl (InstRes t)   = "$(mkDummyInstance \"" ++ A.prettyPrint (deQual t) ++ "\")"
+  mkDecls = unlines . map mkDecl . onubSortBy id 
+
+  fname = "foo"
+  base = (++ "\n")
+       . A.prettyPrint . mkFun fname . twhered 
+       $ map (modify funName (++ "'") . fst) xs
+      ++ map mkSig specialized
+  mkSig (d, t) = set funExpr (A.ExpTypeSig sp (mkPlain "undefined") t) d
+  specialized = map (second $ annType . specializeTypes tm) xs
 
 getColorMap :: TypeMap -> Apps -> ColorMap
 getColorMap tm = M.fromList . (`zip` colours)
