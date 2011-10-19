@@ -110,6 +110,18 @@ onubBy f = map head . pairGroupBy f
 onubSortBy :: Ord a => (b -> a) -> [b] -> [b]
 onubSortBy f = onubBy ((==) `on` f) . sortBy (comparing f)
 
+-- from Emil Axelsson's 'syntactic' package
+fullPartition :: (a -> a -> Bool) -> [a] -> [[a]]
+fullPartition eq []     = []
+fullPartition eq (a:as) = (a:as1) : fullPartition eq as2
+  where
+    (as1,as2) = partition (eq a) as
+
+extractFirst :: (a -> Bool) -> [a] -> Maybe (a, [a])
+extractFirst fn [] = Nothing
+extractFirst fn (a:as) =
+   if fn a then Just (a,as) else extractFirst fn as >>= return . second (a:)
+
 debug :: Show a => a -> a
 debug x = trace (show x) x
 
@@ -185,6 +197,19 @@ wordIx cnt ix txt = getIx (cnt + maybe loffs id (findIndex (>ix) offs))
           | i >= loffs = last offs
           | otherwise = offs !! i
 
+-- From Yi code.  Defns seem backwards..
+padLeft, padRight :: Int -> String -> String
+padLeft n [] = replicate n ' '
+padLeft n (x:xs) = x : padLeft (n-1) xs
+padRight n = reverse . padLeft n . reverse
+
+-- From Thomas Eding's monadlist
+scanM :: (Monad m, ST.MonadPlus p) => (a -> b -> m a) -> a -> [b] -> m (p a)
+scanM _ z [] =  return $ return z
+scanM f z (x:xs) = do
+  z' <- f z x
+  liftM (ST.mplus $ return z) $ scanM f z' xs
+
 ivlHull :: (Ord t, Ord t1) => (t, t1) -> (t, t1) -> (t, t1)
 ivlHull (f1, t1) (f2, t2) = (min f1 f2, max t1 t2)
 
@@ -212,6 +237,9 @@ spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c) =
 
 preferOk :: ParseResult a -> Maybe a
 preferOk = rightToMaybe . parseResultToEither
+
+mustOk :: ParseResult a -> a
+mustOk = fromJust . preferOk
 
 manyNames :: [String]
 manyNames = ["__" ++ filter (not . isSpace) [a, b, c] | c <- az, b <- az, a <- tail az ]
@@ -247,7 +275,6 @@ mutate f = do
   ST.put (f x)
   return x
 
-
 type WST = ST.State ([String], [DeclS])
 
 whereify :: ExpS -> (ExpS, [DeclS])
@@ -263,6 +290,7 @@ whereify top = second snd $ ST.runState (rec top) (manyNames, [])
   rec e@(A.App _ _ _) = addDecl' (gs e) 
                       =<< (liftM buildApp . mapM rec $ decompApp e)
   rec v@(A.Var _ _) = return v
+  rec v@(A.Paren _ e) = grec e
   rec e = addDecl' (gs e) =<< grec e
 
   grec :: forall a . Data a => a -> WST a
@@ -369,13 +397,15 @@ Ok, here's the procedure:
  1) Set the whole top-level declaration to 'undefined', in order to get the
  type, in the case that an explicit type is not specified.
 
- 2) Whereify, and speculatively set subtrees to undefined.
+ 2) Whereify, and use recursive application of the seminal removal scheme
 
- 3) Duplicate definitions which are referenced in multiple locations, and create
- artificial unions:
-   " __a = x; __b = x; __c = if undefined then __a else __b"
+ 3) Rename all of the created definitions, and replace the old names with
+ explicitly typed dummy-undefineds, which assign a unique constructor to each
+ potentially unique polymorphic variable.
 
- 4) Use iterative application of the seminal top-down-removal scheme
+ 3) Use the type errors to incrementally guide creating a dummy typing
+ environment.  The construction of this environment determines the causation of
+ types within the subexpression being analyzed.
 -}
 
 type STT = ST.State (String, M.Map String Char)
@@ -425,7 +455,7 @@ cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
     return $ TyForall (liftM (map snd) bs) cx t'
   doType t = gmapM rec t
 
--- Throws away top foralls
+-- NOTE: Throws away top foralls
 -- TODO: shadow nested foralls
 specializeTypes :: M.Map String Type -> Type -> Type
 specializeTypes m (TyForall _ _ t) = specializeTypes m t
@@ -433,8 +463,7 @@ specializeTypes m t = rec t
  where
   rec :: (Data a) => a -> a
   rec = gmapT rec `extT` doName
-  doName (TyVar (Ident  ((`M.lookup` m) -> Just t'))) = t'
-  doName (TyVar (Symbol ((`M.lookup` m) -> Just t'))) = t'
+  doName ((`M.lookup` m). prettyPrint -> Just t') = t'
   doName t = gmapT rec t
 
 splitFunc :: Type -> [Type]
@@ -447,11 +476,14 @@ splitFunc ty = case ty of
     t -> [addCtx ctx t]
 
 -- Precondition for semantically correct splitting: type is cannonicalized
+-- TODO: we aren't using it that way currently... add in forall shadowing stuff
 splitType :: Type -> [Type]
 splitType (TyForall bnds ctx t) = map (addCtx ctx) $ splitType t
 splitType t@(TyVar _) = [t] 
 splitType t@(TyCon _) = [t] 
 splitType t@(TyInfix _ n _) = [TyCon n]
+-- ignore the higher-kinded parts for now
+splitType t@(TyApp _ r) = splitType r
 splitType t = concat $ gmapQ (const [] `extQ` splitType) t
 
 listAll :: forall b c. (Data b) => (forall a. (Data a) => a -> [c]) -> b -> [c]
@@ -473,7 +505,15 @@ deQual = gmapT (deQual `extT` doA `extT` doE)
  where
   doA :: A.QName SrcSpanInfo-> A.QName SrcSpanInfo
   doA (A.Qual s a b) = A.UnQual s b
+  doA x = x
   doE (Qual a b) = UnQual b
+  doE x = x
+
+reQual :: Data a => String -> a -> a
+reQual n = gmapT (reQual n `extT` doE)
+ where
+  doE (UnQual a) = Qual (ModuleName n) a
+  doE x = x
 
 -- Free variables in the expression.
 freeEVars :: ExpS -> [String]
