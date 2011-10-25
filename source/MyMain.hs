@@ -1,5 +1,6 @@
-module MyMain (module Prelude, module Data.Char, dummyInstance, mkDummyInstance, mkDummyInstances) where
+module MyMain (module Prelude, module Data.Char, module Control.Arrow, dummyInstance, mkDummyInstance, mkDummyInstances) where
 
+import Control.Arrow
 import Control.Monad
 import Language.Haskell.TH
 import Language.Haskell.Meta.Parse

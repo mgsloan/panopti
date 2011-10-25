@@ -122,6 +122,13 @@ extractFirst fn [] = Nothing
 extractFirst fn (a:as) =
    if fn a then Just (a,as) else extractFirst fn as >>= return . second (a:)
 
+deleteFirst :: (a -> Bool) -> [a] -> [a]
+deleteFirst fn = snd . fromJust . extractFirst fn
+
+dropLast :: [a] -> [a] 
+dropLast [x] = []
+dropLast (x:xs) = x : dropLast xs
+
 debug :: Show a => a -> a
 debug x = trace (show x) x
 
@@ -230,10 +237,9 @@ getSpan' :: (Data a) => a -> Ivl
 getSpan' = colSpan . fromJust . getSpan
 
 spanContains :: SrcSpan -> SrcLoc -> Bool 
-spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c) =
-  f == f' && (if sl == l then sc <= c else sl < l)
-          && (if el == l then ec >= c else el > l)
-
+spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c)
+  =  (if sl == l then sc <= c else sl < l)
+  && (if el == l then ec >= c else el > l)
 
 preferOk :: ParseResult a -> Maybe a
 preferOk = rightToMaybe . parseResultToEither
@@ -275,6 +281,8 @@ mutate f = do
   ST.put (f x)
   return x
 
+-- TODO: consider writing Type information into application tree?
+
 type WST = ST.State ([String], [DeclS])
 
 whereify :: ExpS -> (ExpS, [DeclS])
@@ -290,7 +298,7 @@ whereify top = second snd $ ST.runState (rec top) (manyNames, [])
   rec e@(A.App _ _ _) = addDecl' (gs e) 
                       =<< (liftM buildApp . mapM rec $ decompApp e)
   rec v@(A.Var _ _) = return v
-  rec v@(A.Paren _ e) = grec e
+  rec v@(A.Paren _ e) = rec e
   rec e = addDecl' (gs e) =<< grec e
 
   grec :: forall a . Data a => a -> WST a
@@ -392,7 +400,11 @@ funcAsExp :: DeclS -> ExpS
 funcAsExp d = A.Let sp (A.BDecls sp [d]) (mkPlain $ get funName d)
 
 {-
-Ok, here's the procedure:
+The theory can be described as: The typing environment which makes a
+monomorphically-punned equivalent compile gives all of the information about the
+polymorphic expression.
+
+here's the procedure:
 
  1) Set the whole top-level declaration to 'undefined', in order to get the
  type, in the case that an explicit type is not specified.
@@ -546,8 +558,8 @@ addCtx ctx t = uncurry3 TyForall
 getExp :: (Data a) => a -> Maybe ExpS
 getExp = (const Nothing) `extQ` Just
 
-icontains :: Ivl -> Ivl -> Bool
-icontains (f, t) (f', t') = f <= f' && t' <= t
+ivlContains :: Ivl -> Ivl -> Bool
+ivlContains (f, t) (f', t') = f <= f' && t' <= t
 
 atSpan :: (Data a) => Ivl -> a -> Maybe ExpS
 atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
@@ -555,7 +567,7 @@ atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
   ifContains :: (Data a) => Maybe b -> a -> Maybe b
   ifContains b x = do
     sp <- getSpan x
-    if colSpan sp `icontains` s then b else Nothing
+    if colSpan sp `ivlContains` s then b else Nothing
   whenExp :: ExpS -> Maybe ExpS
   whenExp x = maybe (Just x) Just $ child x
   child :: (Data x) => x -> Maybe ExpS
@@ -573,6 +585,28 @@ lexify = runParserWithMode parseMode lexRec
   lexRec = runL (Lex lexer) (\x -> case unLoc x of
       EOF -> return []
       _ -> liftM (x:) lexRec)
+
+balanceParens :: [Loc Token] -> String
+balanceParens = map tokChar . (`doToks`[]) . map unLoc
+ where
+  tokChar RightParen  = ')'
+  tokChar RightSquare = ']'
+  tokChar RightCurly  = '}'
+
+  doToks [] s = s
+  doToks (LeftParen :xs) s = doToks xs $ RightParen  : s
+  doToks (LeftSquare:xs) s = doToks xs $ RightSquare : s
+  doToks (LeftCurly :xs) s = doToks xs $ RightCurly  : s
+  doToks (r:xs) s
+    | r `elem` [RightParen, RightSquare, RightCurly]
+    = doToks xs $ maybe s snd $ extractFirst (==r) s
+  doToks (_:xs) s = doToks xs s
+
+instance (Eq a) => Eq (ParseResult a) where
+  (ParseOk x)       == (ParseOk y)       = x == y
+  (ParseFailed a x) == (ParseFailed b y) = x == y && a == b
+  _ == _ = False
+  
 
 -- Taken from Language.Haskell.Meta.Parse
 parseResultToEither :: ParseResult a -> Either String a

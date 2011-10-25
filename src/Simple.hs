@@ -1,7 +1,7 @@
 {-# LANGUAGE RankNTypes, ExistentialQuantification, ScopedTypeVariables, PatternGuards, FlexibleContexts #-}
 
 module Simple
-    ( Task (..), TaskChan
+    ( IError(..), Task (..), TaskChan
     , startGHCiServer
     , restartGHCiServer
     , interpret
@@ -27,8 +27,10 @@ import Prelude hiding (catch)
 
 -------------------------
 
+type IError a = Either InterpreterError a
+
 data Task 
-    = forall a. Task FilePath (MVar (Either InterpreterError a)) (Interpreter a)
+    = forall a. Task FilePath (MVar (IError a)) (Interpreter a)
 
 newtype TaskChan 
     = TC (Chan (Maybe Task))
@@ -89,7 +91,7 @@ startGHCiServer paths logError logMsg = do
 restartGHCiServer :: TaskChan -> IO ()
 restartGHCiServer (TC ch) = writeChan ch Nothing
 
-interpret :: TaskChan -> FilePath -> Interpreter a -> IO (Either InterpreterError a)
+interpret :: TaskChan -> FilePath -> Interpreter a -> IO (IError a)
 interpret (TC ch) fn m = do
     rep <- newEmptyMVar
     writeChan ch $ Just $ Task fn rep m
