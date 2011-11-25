@@ -17,10 +17,11 @@ import Data.Curve hiding ((<.>))
 import Data.Curve.Util (mapT, foldT, zipT)
 import qualified Data.Curve.Interval as Ivl
 import Data.Data hiding (typeOf)
+import Data.Generics.Schemes (listify)
 import Data.IntervalMap.FingerTree as IM
 import Data.IORef
 import Data.Label
-import Data.List (sort, findIndex, sortBy, find, (\\), partition, isPrefixOf)
+import Data.List (sort, findIndex, sortBy, find, (\\), partition, isPrefixOf, group)
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
@@ -65,11 +66,17 @@ type TypeMap = M.Map Ivl Type
 type Error = (Ivl, String)
 type Edit = (Ivl, String)
 
+data Resolution
+  = DataRes { resType :: Type }
+  | TypeRes { resType, targType :: Type }
+  | InstRes { resType :: Type }
+  deriving (Eq, Ord)
+
 data Results = Results
   { _source :: String 
   , _partial_source :: String
   , _errors :: [Error]
-  , _subsets :: [[([Type], [(Ivl, Type)])]]
+  , _subsets :: [[([Resolution], [(Ivl, Type)])]]
   }
 
 data UserMode = Normal | Selection Bool
@@ -285,36 +292,42 @@ getHeight (_, y) (f, t)
 
 surround :: String -> String -> DRect -> C.Render DRect
 surround pre post r = do
+  initial <- C.getCurrentPoint
   from <- liftM (((rside 3 r `at` 0.5) ^-^) . second (/(-2))) $ textSize pre  
   move from
   C.showText pre
   psz <- textSize post
   let to = (rside 1 r `at` 0.5) ^+^ (second (/2) psz)
-  move $ to ^-^ (fst psz, 0)
+  move to
   C.showText post
-  return . expandR (1, 0) $ boundPoints [from, to] `Data.Curve.union` r
+  return $ Data.Curve.union (boundPoints [from, (fst to, snd from)]) r
 
 allIvls :: Apps -> [(Ivl, Ivl)]
 allIvls = onubSortBy snd
         . concatMap (\(a, b, xs) -> (a, b) : map (\x -> (x, x)) xs)
 
 shapes :: [C.Render DRect]
-shapes 
-  = zipWith (>>)
-  ( cycle $ map (setColor . readColor)
-    [ "8f8f8f"
-    , "e5786d"
-    , "95e454"
-    , "8ac6f2"
-    , "e7f6da"
-    ] )
-  [ drawShape (\p -> C.arc (fst p) (snd p) 3 0 (2 * pi))
-  , drawPoly 3 q
-  , drawPoly 3 (q * 3)
-  , drawPoly 4 (q / 2)
-  , drawPoly 4 0
-  , drawPoly 5 q
-  ]
+shapes = [ scolor >> dshape 
+         | scolor <- cycle $ map (setColor . readColor)
+                   [ "#8f8f8f"
+                   , "#e5786d"
+                   , "#95e454"
+                   , "#8ac6f2"
+                   , "#e7f6da"
+                   , "#3f3ff2"
+                   , "#05786d"
+                   , "#90f494"
+                   , "#8fc6a2"
+                   ]
+         | dshape <- cycle
+                   [ drawShape (\p -> C.arc (fst p) (snd p) 3 0 (2 * pi))
+                   , drawPoly 3 q
+                   , drawPoly 3 (q * 3)
+                   , drawPoly 4 (q / 2)
+                   , drawPoly 4 0
+                   , drawPoly 5 q
+                   ]
+         ]
  where
   q = pi / 2
   drawShape s = do
@@ -347,22 +360,34 @@ csort :: (a -> Ivl) -> [a] -> [a]
 --csort f = sortBy $ comparing (\x -> length . filter ((`ivlContains` f x) . f))
 csort f = sortBy $ comparing (\x -> ivlWidth $ f x)
 
+{- TODO:
+  need to do the drawing of types in a way that transparently
+ -}
+
 drawTypes :: [C.Render DRect] -> DPoint -> DPoint -> Results -> C.Render ()
-drawTypes shs pos m res 
-  = zipWithM_ drawOption [(fst pos, y) | y <- ys] (get subsets res)
-  >> C.setFontSize 20
+drawTypes shs pos m res = do
+   let subs = get subsets res
+   when (not . null $ subs) $
+     zipWithM_ drawOption [(fst pos, y) | y <- ys] ((:[]) . last $ subs)
+   C.setFontSize 20
  where
   ys = [snd pos, snd pos + 150..]
   txt = get source res
  
-  drawOption :: DPoint -> [([Type], [(Ivl, Type)])] -> C.Render ()
+  drawOption :: DPoint -> [([Resolution], [(Ivl, Type)])] -> C.Render ()
   drawOption pos subs = do
      let ordered = csort fst 
-                 $ map (\(_, xs) -> (,xs) . foldl1 ivlHull $ map fst xs) subs
+                 $ map (\(_, xs) -> (,xs) . foldl1 ivlHull $ map fst xs)
+                 -- temporary stopgap
+                 $ filter (not . null . snd) subs
+              
      foldM drawChunk IM.empty ordered
      return ()
    where
-    prims = M.fromList $ zip (concatMap (map (trim . prettyPrint) . fst) subs) shs
+-- TODO: consider selecting the primitive types based on repetition counts /
+-- some fitness factor / etc.
+    prims = M.empty --M.fromList
+          -- $ zip (concatMap (map (trim . prettyPrint) . fst) subs) shs
 
     spanLine' ivl = do
       C.setFontSize 20
@@ -464,7 +489,7 @@ drawTypes shs pos m res
       let (x1, y1) = sp `at` 0
           (x2, y2) = sp `at` 1.0
           y = getBottom y2 (Ivl.makeIvl x1 x2) hm
-          omitBrace = not $ ' ' `elem` substr ivl txt
+          omitBrace = True -- not $ ' ' `elem` substr ivl txt
       if omitBrace
         then move (x1, y)
         else do
@@ -485,26 +510,33 @@ drawTypes shs pos m res
              . maximum . map snd . concat $ M.elems im'
       return (IM.insert (cvtIvl $ fst r) y' hm, M.unionWith (++) outside im'')
      where
+      drec ctx t = do
+        pnt <- C.getCurrentPoint
+        C.liftIO $ print $ prettyPrint t ++ show pnt ++ "; "
+        res <- rec ctx t
+        C.liftIO $ print (fst res)
+        return res
       rec :: Context -> Type -> C.Render (DRect, PosMap)
       rec ctx t@(TyFun _ _) = do
-        (rect, pm) <- drawLTR (rec ctx) $ splitFunc t
-        let line = toBezier $ offset (2, -2) $ rside 0 rect
+        (rect, pm) <- drawLTR (drec ctx) $ splitFunc t
+        let line = toBezier $ offset (2, -10) $ rside 0 rect
         setColor ((1.0, 1.0, 1.0) :: DColor)
         draw line
         drawArrow 2 1 0.9 line
         C.stroke
-        return . (,pm) $ expandR (5, 0) rect
+        return . (,pm) $ expandR (5, 5) rect
       rec ctx (TyTuple _ xs) = do
-        (rect, pm) <- drawLTR (rec ctx) xs
+        (rect, pm) <- drawLTR (drec ctx) xs
         setColor ((1.0, 1.0, 1.0) :: DColor)
         liftM (,pm) $ surround "(" ")" rect
       rec ctx (TyList t) = do
-        (rect, pm) <- rec ctx t
+        (rect, pm) <- drec ctx t
         setColor ((1.0, 1.0, 1.0) :: DColor)
         liftM (,pm) $ surround "[" "]" rect
       rec ctx t@(TyVar _) = prim ctx t
       rec ctx t@(TyCon _) = prim ctx t
-      rec ctx (TyForall _ ctx' t) = rec (ctx' ++ ctx) t
+      rec ctx (TyForall _ ctx' t) = drec (ctx' ++ ctx) t
+      rec ctx (TyParen t) = drec ctx t
       rec ctx t = fallback t
       prim ctx t =
         let str = trim . prettyPrint $ addCtx ctx t in
@@ -512,7 +544,8 @@ drawTypes shs pos m res
             Just sh -> do
               fr <- C.getCurrentPoint
               liftM (, M.singleton str [fr ^+^ (3,0)]) sh
-            Nothing -> fallback t
+            Nothing -> --trace ("fallback of prim " ++ str) 
+                       fallback t
       fallback t = do
         let typ = trim $ prettyPrint t
         setColor ((1.0, 1.0, 1.0) :: DColor)
@@ -525,6 +558,7 @@ drawTypes shs pos m res
 
     drawLTR :: (a -> C.Render (DRect, PosMap)) -> [a] -> C.Render (DRect, PosMap)
     drawLTR f = liftM ((foldl1 Data.Curve.union *** foldl1 (M.unionWith (++))) .  unzip)
+--              . liftM (debugWith $ show . length)
               . mapM (\x -> do
                   res@(r,_) <- liftM (first $ expandR (3, 0)) $ f x
                   move $ rside 1 r `at` 0.5
@@ -533,18 +567,18 @@ drawTypes shs pos m res
 update :: State -> IO State
 update s = (parsed' $ partialParse A.parseExp txt) >>= flip (setM parsed) s
  where
-  txt = get code s 
+  txt = get code s
   parsed' (Just (expr, txt', errs)) = do
     let w = whereify expr
     subs <- (liftM (map tail)
-          . mapM (scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns) 
+          . mapM (scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns)
                         (undefined, [], [], manyNames)))
         =<< getSubsets w (get chan s)
-    let subs' = map (map (\(_,b,c,_) -> (b,) $ map (first getSpan') c)) subs
-    mapM_ (return . watchTypeds "" . map (\(_,_,c,_) -> c)) subs
+    mapM_ (return . watchTypeds "unified " . map (\(_,_,c,_) -> c)) subs
     printWatches
-    return (Just $ Results txt txt' errs subs')
+    return (Just $ Results txt txt' errs (processSubsets subs))
   parsed' Nothing = return Nothing
+  processSubsets = map (map (\(_,a,b,_) -> (a, map (first getSpan') b)))
 
 ivlWidth :: Ivl -> Int
 ivlWidth = foldT subtract
@@ -617,7 +651,7 @@ getTopSubset :: RootedMap -> TaskChan -> IO [TypedDecls]
 getTopSubset (top, dm) chan = do 
    types <- getTypes $ M.elems dm
    case types of
-     Left err -> recTop
+     Left err -> watch' ("top " ++ err) err $ recTop
      Right xs -> return [xs]
  where
   recTop :: IO [TypedDecls]
@@ -649,7 +683,8 @@ getTopSubset (top, dm) chan = do
     return $ case typ of
       Left err -> Left (show err)
       Right typeStr -> Right $
-        case processType $ parseType typeStr of
+        case watchWith (concatMap (concatMap E.prettyPrint) . maybeToList) "tupT"
+           $ processType $ parseType typeStr of
           Just xs -> zip decls xs
           _ -> []
 
@@ -666,15 +701,16 @@ getSubsets :: (ExpS, [DeclS]) -> TaskChan -> IO [[TypedDecls]]
 getSubsets p@(top, ds) chan = recurse (top, declMap ds)
  where
   recurse :: RootedMap -> IO [[TypedDecls]]
-  recurse arg@(r, dm) = do
+  recurse arg@(r, dm) | M.null dm = return []
+                      | otherwise = do
     --putStrLn $ unlines . map prettyPrint $ M.elems dm
     results <- getTopSubset arg chan
-    if null (watchTypeds (prettyPrint r) results)
+    if null results
       then return []
       else mapM (\xs -> liftM (xs:) . recurse'
                       . foldr M.delete dm 
                       $ map (get funName . fst) xs
-                ) results
+                ) $ watchTypeds (prettyPrint r) results
 
   recurse' :: DeclMap -> IO [TypedDecls]
   recurse' dm
@@ -686,11 +722,32 @@ getSubsets p@(top, ds) chan = recurse (top, declMap ds)
 -- Should be a better way to do this....
 annType = mustOk . A.parse . prettyPrint
 
-data Resolution
-  = DataRes { resType :: Type }
-  | TypeRes { resType, targType :: Type }
-  | InstRes { resType :: Type }
-  deriving (Eq, Ord)
+
+{- unifyTypes
+
+In order to extract the unified constraints between these polymorphic variables,
+replace all of the variables and literals with explicitly typed undefineds.  We
+give these undefineds monomorphic types, with all the variables replaced with 
+references to dummy, constructorless data types. Unification of these types 
+happens in the compound portions of the expression, which are left unchanged.
+
+The errors that result from type checking this transformed definition tells us
+the typing context necessary to make it compile.  For example, an exception of 
+the form "Couldn't match expected type `A' with actual type `B'." means that 
+the corresponding parametric variables have an equality constraint.  Next, we 
+need to resolve the error so that further information can be gleaned.  This can
+either be done by introducing a type synonym, or rewriting the type signatures, 
+cannonicalizing either A or B.
+
+Typeclass errors inform of the constraints between the different type variables.
+Rather than generating instance definitions directly, $(mkDummyInstance ''A)
+template-haskell invocations are created.  mkDummyInstance gets the information 
+about the type class, and implements it by setting all of the methods to 
+'undefined'.  I figure that having TH generate ASTs is faster than serializing a
+definition, and having it re-parsed.
+-}
+isTypeRes (TypeRes _ _) = True
+isTypeRes _ = False
 
 instance Show Resolution where
   show (TypeRes t b) = "type " ++ A.prettyPrint (deQual t) ++ " = " ++ A.prettyPrint b
@@ -708,70 +765,96 @@ watchTyped n xs = watch' n
   ys = map (\(a, b) -> (prettyPrint a, prettyPrint b)) xs
   padding = maximum $ map (length . fst) ys
 
--- TODO: consider selecting the primitive types based on repetition counts /
--- some fitness factor / etc.
+  {-
+cons = map head . group . sort
+         $ concatMap (listify (\x -> case x of (TyCon _) -> True; _ -> False)) res
+
+    -- All of the parametric variables used in the result.
+    datas = [a | DataRes a <- debug' "Resolutions" rs]
+  -}
 
 unifyTypes :: TaskChan -> [String] -> TypedDecls
-           -> IO (Either I.InterpreterError String, [Type], TypedDecls, [String])
-unifyTypes chan names xs = do
-  (typ, rs) <- rec $ map DataRes typesUsed
-  let syns = map (pickRoot rs . onubSortBy id . concatMap (\(a, b) -> [a, b]))
-           $ fullPartition (\(a, b) (a', b') -> b == b' || a == b' || b == a')
-             [(a, b) | TypeRes a b <- rs]
-      synM = M.fromList $ concatMap (\(x, xs) -> map ((,x) . prettyPrint) xs) syns
-      datas = [a | DataRes a <- watch "Resolutions" rs]
-  let res = map (second $ specializeTypes synM) rewritten
-  return (typ, datas ++ map fst syns, res, namesRemaining)
+           -> IO (Either I.InterpreterError String, [Resolution], TypedDecls, [String])
+unifyTypes chan names tdecls  = do
+  (typ, rs, ds) <- rec (map DataRes typesUsed, tdecls)
+  return (typ, rs, rewrite tm' ds, namesRemaining)
  where
-  freeVars = onubSortBy id $ concatMap (freeTVars . snd) xs
+  (vars, comps) = partition (isVarOrLit . get funExpr . fst) tdecls
+
+  isVarOrLit :: ExpS -> Bool
+  isVarOrLit (A.Var _ _) = True
+  isVarOrLit (A.IPVar _ _) = True
+  isVarOrLit (A.Lit _ _) = True
+  isVarOrLit _ = False
+
+  -- All of the free polymorphic variables in the declarations
+  freeVars = onubSortBy id $ concatMap (freeTVars . snd) tdecls
+
+  -- Get the names we'll need for dummy datatypes.
   (namesUsed, namesRemaining) = splitAt (length freeVars) names
-  typesUsed = map (E.TyCon . E.Qual (E.ModuleName "L") . E.Ident . ("T" ++)) namesUsed
 
-  tm = M.fromList [(t, n) | t <- freeVars | n <- typesUsed]
+  -- Create types out of the names.
+  typesUsed = [ E.TyCon . E.Qual (E.ModuleName "L") . E.Ident $ "T" ++ n | n <- namesUsed ]
 
-  pickRoot rs xs = case partition isConL xs of
-                     (xs, [h]) -> (h, xs)
-                     (xs, []) -> fromJust 
-                               $ extractFirst ((`elem`rs) . DataRes) xs
+  -- Forward and reverse mappings of the types.
+  tm  = M.fromList [(t, n) | t <- freeVars | n <- typesUsed]
+  tm' = M.fromList [(prettyPrint n, E.TyVar $ E.Ident t) | t <- freeVars | n <- typesUsed]
 
-  rec rs = do
-    typ <- interpretWith chan (base ++ mkDecls rs) (typeOf fname)
+  rewrite m = map (second $ specializeTypes m)
+
+  -- Declarations with variables and literals are replaced with "undefined"
+  -- with explicit types.
+  rewritten = comps ++ map mkSig (rewrite tm vars)
+   where
+    mkSig (d, t) = (set funExpr (A.ExpTypeSig sp (mkPlain "undefined") $ annType t) d, t)
+
+  -- Get the code for a function definition, from the rewritten declarations.
+  rec (rs, ds)  = do
+    let fname = "foo"
+        txt = (A.prettyPrint . mkFun fname . twhered $ map fst ds)
+            ++ "\n" ++ (unlines . map show $ onubSortBy id rs)
+    typ <- interpretWith chan (debugWith ("unify-state:" ++) txt) (typeOf fname)
     case typ of
-      Left (I.WontCompile xs) -> let rs' = concatMap resolve xs in
-        if null rs' then return (typ, rs)
-          else rec $ rs' ++ (rs \\ [DataRes t | (TypeRes t _) <- rs'])
-      _ -> return (typ, rs)
+      Left (I.WontCompile xs) -> handleErrors typ xs
+      _ -> return (typ, rs, ds)
+   where
+    -- Pick a type to use as the cannonical name for a synonym group
+    pickCannonical rs xs 
+        = case partition isConL xs of
+            -- Prefer constructors if there is one.
+            (xs, [h]) -> (h, xs)
+            (xs, []) -> fromJust $ extractFirst ((`elem`rs) . DataRes) xs
 
-  resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
-    TypeError (EqualityError a b _ _) _ ->
-      let a' = mustOk $ parseType a
-          b' = mustOk $ parseType b in
-      case (isConL a', isConL b') of
-        (True,  True ) -> if a < b then [TypeRes a' b'] else [TypeRes b' a']
-        (False, True ) -> [TypeRes b' a']
-        (True,  False) -> [TypeRes a' b']
-        _ -> []
-    TypeError (InstanceError a _) _ -> [InstRes (mustOk $ parseType a)]
-    _ -> []
+    isConL (TyCon (E.Qual (E.ModuleName "L") _)) = True
+    isConL _ = False
 
-  isConL (TyCon (E.Qual (E.ModuleName "L") _)) = True
-  isConL _ = False
+    -- Create a resolution for each kind of error, and rewrite based on type
+    -- equality constraint. 
+    handleErrors typ xs = do
+      let (ts, rs') = partition isTypeRes $ concatMap resolve xs
+          -- Build a map from each of these to the cannonical type.
+          synMap = M.fromList
+                 . concatMap (\(x, xs) -> map ((,x) . prettyPrint) xs)
+          -- Pick the cannonical type for each group.
+                 . map (pickCannonical rs . onubSortBy id . concatMap (\(a, b) -> [a, b]))
+          -- Find all related type-synonyms
+                 $ transitivePartition (\(a, b) (a', b') -> b == b' || a == b' || b == a')
+                 [ (a, b) | TypeRes a b <- ts ]
+      if null rs'
+        then return (typ, rs, ds)
+        else rec (rs' ++ rs, rewrite synMap ds)
+
+    resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
+      TypeError (EqualityError a b _ _) _ ->
+        let a' = mustOk $ parseType a
+            b' = mustOk $ parseType b in [TypeRes a' b']
+      TypeError (InstanceError a _) _ -> [InstRes (mustOk $ parseType a)]
+      _ -> []
 
   deQualL (TyCon (E.Qual (E.ModuleName "L") x)) = Right (TyCon $ E.UnQual x)
   -- Temporary hack
   deQualL (TyCon (E.Qual _ x)) = Left (TyCon $ E.UnQual x)
   deQualL t = Left t
-
-  mkDecls = unlines . map show . onubSortBy id 
-
-  fname = "foo"
-  base = (++ "\n")
-       . A.prettyPrint . mkFun fname . twhered 
-       $ map (modify funName (++ "'") . fst) xs
-      ++ map (mkSig . second annType) rewritten
-  mkSig (d, t) = set funExpr (A.ExpTypeSig sp (mkPlain "undefined") t) d
-  rewritten = map (second $ specializeTypes tm) xs
-
 
 readColor :: String -> (Int, Int, Int)
 readColor = toIColor . toSRGB24 . sRGB24read

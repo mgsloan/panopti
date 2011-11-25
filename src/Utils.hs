@@ -101,11 +101,11 @@ pairGroupBy f (x:y:xs)
  where
   (y':ys') = pairGroupBy f (y:xs)
 
-onub :: Eq b => [b] -> [b]
-onub = onubBy (==)
-
 onubBy :: (b -> b -> Bool) -> [b] -> [b]
 onubBy f = map head . pairGroupBy f
+
+onub :: Eq b => [b] -> [b]
+onub = onubBy (==)
 
 onubSortBy :: Ord a => (b -> a) -> [b] -> [b]
 onubSortBy f = onubBy ((==) `on` f) . sortBy (comparing f)
@@ -116,6 +116,17 @@ fullPartition eq []     = []
 fullPartition eq (a:as) = (a:as1) : fullPartition eq as2
   where
     (as1,as2) = partition (eq a) as
+
+-- Not super efficient, but ohwell.
+transitivePartition :: (a -> a -> Bool) -> [a] -> [[a]]
+transitivePartition f [] = []
+transitivePartition f (x:xs) = xs1' : transitivePartition f xs2'
+ where
+  (xs1', xs2') = helper [x] xs
+  helper [] xs = ([], xs)
+  helper ys xs = first (xs1++) $ helper xs1 xs2
+   where
+    (xs1, xs2) = partition (\x -> any (`f` x) ys) xs
 
 extractFirst :: (a -> Bool) -> [a] -> Maybe (a, [a])
 extractFirst fn [] = Nothing
@@ -134,6 +145,9 @@ debug x = trace (show x) x
 
 debug' :: Show a => String -> a -> a
 debug' pre x = trace (pre ++ show x) x
+
+debugWith :: (a -> String) -> a -> a
+debugWith f x = trace (f x) x
 
 gdebug :: Data a => a -> a
 gdebug x = trace (gshow x) x
@@ -297,7 +311,7 @@ whereify top = second snd $ ST.runState (rec top) (manyNames, [])
     addDecl (gs l) v ps bs acc
   rec e@(A.App _ _ _) = addDecl' (gs e) 
                       =<< (liftM buildApp . mapM rec $ decompApp e)
-  rec v@(A.Var _ _) = return v
+  rec v@(A.Var _ _) = addDecl' (gs v) v
   rec v@(A.Paren _ e) = rec e
   rec e = addDecl' (gs e) =<< grec e
 
@@ -478,14 +492,20 @@ specializeTypes m t = rec t
   doName ((`M.lookup` m). prettyPrint -> Just t') = t'
   doName t = gmapT rec t
 
+
+preserveContext :: Monad m => (Type -> m Type) -> Type -> m Type
+preserveContext f (TyForall bnds ctx t) = f t >>= return . TyForall bnds ctx
+preserveContext f t = f t
+
 splitFunc :: Type -> [Type]
-splitFunc ty = case ty of
-    (TyForall bnds ctx t) -> rec t ctx
-    t -> rec t []
+splitFunc (TyFun a b) = a : splitFunc b
+splitFunc t = [t]
+
+splitApp :: Type -> [Type]
+splitApp = reverse . helper
  where
-  rec t ctx = case t of
-    (TyFun a b) -> addCtx ctx a : rec b ctx
-    t -> [addCtx ctx t]
+  helper (TyApp a b) = b : helper a
+  helper t = [t]
 
 -- Precondition for semantically correct splitting: type is cannonicalized
 -- TODO: we aren't using it that way currently... add in forall shadowing stuff
@@ -543,6 +563,18 @@ freeTVars t = rec t
   rec :: (Data a) => a -> [String]
   rec = (concat . gmapQ (rec `extQ` freeTVars)) `extQ` getVar
 
+-- Get 'primitives', tings replaceable by dot and line
+{-
+uniquePrims :: [Type] -> [Type]
+uniquePrims = map head . group . sort . concatMap getPrims
+isPrim :: Type -> Bool
+isPrim t@(TyVar _) = True
+isPrim t@(TyCon _) = True
+isPrim _ = False
+getPrims :: Type -> [Type]
+getPrims = listify isPrim
+-}
+
 -- TODO: transitive closure on polymorphic var usage..
 addCtx :: [Asst] -> Type -> Type
 addCtx [] t = t
@@ -573,10 +605,10 @@ atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
   child :: (Data x) => x -> Maybe ExpS
   child x = ifContains (msum $ gmapQ (atSpan s) x) x
 
-type ExpS = A.Exp A.SrcSpanInfo
-type DeclS = A.Decl A.SrcSpanInfo
-type NameS = A.Name A.SrcSpanInfo 
-type PatS = A.Pat A.SrcSpanInfo
+type ExpS   = A.Exp   A.SrcSpanInfo
+type DeclS  = A.Decl  A.SrcSpanInfo
+type NameS  = A.Name  A.SrcSpanInfo 
+type PatS   = A.Pat   A.SrcSpanInfo
 type MatchS = A.Match A.SrcSpanInfo
 
 lexify :: String -> ParseResult [Loc Token]
