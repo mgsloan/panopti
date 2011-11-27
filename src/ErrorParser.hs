@@ -33,7 +33,6 @@ toTrees = rec . map (length . takeWhile isSpace &&& trim) . lines
 
 concatTree (Tree x xs) = unwords $ x : map concatTree xs
 
-
 -- These are errors we understand.
 data GHCError = TypeError TypeError [AuxInfo] --SrcSpan
               | IdentifierError String [String] --SrcSpan

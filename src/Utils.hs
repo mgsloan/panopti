@@ -12,6 +12,7 @@ import Control.Concurrent.MVar
 import Control.Monad (liftM, msum)
 import qualified Control.Monad.State as ST
 import Data.Char (isSpace)
+import Data.Curve.Util (foldT)
 import Data.Data hiding (typeOf)
 import Data.Function (on)
 import Data.Generics.Text (gshow)
@@ -26,8 +27,6 @@ import Data.Generics.Aliases
 import Debug.Trace
 import Language.Haskell.Exts hiding (parseType)
 import qualified Language.Haskell.Exts.Annotated as A
-import Language.Haskell.Exts.Lexer
-import Language.Haskell.Exts.ParseMonad
 import Language.Haskell.Exts.SrcLoc
 import Language.Haskell.TH.Quote
 import Prelude hiding ((.))
@@ -160,8 +159,8 @@ whenJust :: Monad m => Maybe a -> (a -> m ()) -> m ()
 whenJust mg f = maybe (return ()) f mg
 
 -- | Conditionally run an action, and yield result.
-maybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
-maybeM f = maybe (return Nothing) (liftM Just . f)
+maybeM :: Monad m => Maybe a -> (a -> m b) -> m (Maybe b)
+maybeM x f = maybe (return Nothing) (liftM Just . f) x
 
 -- takes an IO function and returns a cached version
 memoIO :: Ord k => (k -> IO b) -> IO (k -> IO b)
@@ -191,6 +190,11 @@ substr (f, t) = take (t - f) . drop f
 subst :: (Int, Int) -> [a] -> [a] -> [a]
 subst (f, t) xs ys = (take f ys) ++ xs ++ drop t ys
 
+type Edit = (Ivl, String)
+
+applyEdits :: [Edit] -> String -> String
+applyEdits = flip $ foldr (uncurry subst)
+
 rightToMaybe :: Either a b -> Maybe b
 rightToMaybe = either (const Nothing) Just
 
@@ -218,6 +222,11 @@ wordIx cnt ix txt = getIx (cnt + maybe loffs id (findIndex (>ix) offs))
           | i >= loffs = last offs
           | otherwise = offs !! i
 
+manyNames :: [String]
+manyNames = ["__" ++ filter (not . isSpace) [a, b, c] | c <- az, b <- az, a <- tail az ]
+ where
+  az = ' ' : ['a'..'z']
+
 -- From Yi code.  Defns seem backwards..
 padLeft, padRight :: Int -> String -> String
 padLeft n [] = replicate n ' '
@@ -240,6 +249,9 @@ ivlHull (f1, t1) (f2, t2) = (min f1 f2, max t1 t2)
 
 type Ivl = (Int, Int) 
 
+ivlWidth :: (Int, Int) -> Int
+ivlWidth = foldT subtract
+
 colSpan :: SrcSpan -> Ivl
 colSpan = (subtract 1 *** subtract 1) . (srcSpanStartColumn &&& srcSpanEndColumn)
 
@@ -261,25 +273,8 @@ preferOk = rightToMaybe . parseResultToEither
 mustOk :: ParseResult a -> a
 mustOk = fromJust . preferOk
 
-manyNames :: [String]
-manyNames = ["__" ++ filter (not . isSpace) [a, b, c] | c <- az, b <- az, a <- tail az ]
- where
-  az = ' ' : ['a'..'z']
-
-decompApp :: ExpS -> [ExpS]
-decompApp = reverse . helper
- where
-  helper (A.App _ l r) = r : decompApp l
-  helper x = [x]
-
 sp :: SrcSpanInfo
 sp = SrcSpanInfo (SrcSpan "" 0 0 0 0) [] --error "srcspan"
-
-buildApp :: [ExpS] -> ExpS
-buildApp = helper . reverse
- where
-  helper [x] = x
-  helper (x:xs) = A.App sp (buildApp xs) x
 
 twhered :: [DeclS] -> ExpS
 twhered funcs
@@ -296,40 +291,6 @@ mutate f = do
   return x
 
 -- TODO: consider writing Type information into application tree?
-
-type WST = ST.State ([String], [DeclS])
-
-whereify :: ExpS -> (ExpS, [DeclS])
-whereify top = second snd $ ST.runState (rec top) (manyNames, [])
- where
-  gs = (`SrcSpanInfo`[]) . fromJust . getSpan
-  rec :: ExpS -> WST ExpS
-  rec l@(A.Lambda _ ps e) = do
-    (ns, acc) <- mutate (second $ const []) 
-    v <- rec e
-    (_, bs) <- ST.get
-    addDecl (gs l) v ps bs acc
-  rec e@(A.App _ _ _) = addDecl' (gs e) 
-                      =<< (liftM buildApp . mapM rec $ decompApp e)
-  rec v@(A.Var _ _) = addDecl' (gs v) v
-  rec v@(A.Paren _ e) = rec e
-  rec e = addDecl' (gs e) =<< grec e
-
-  grec :: forall a . Data a => a -> WST a
-  grec = gmapM (grec `extM` rec)
-
-  addDecl' srcsp e = do
-    (_, acc) <- ST.get
-    addDecl srcsp e [] [] acc
-  addDecl :: SrcSpanInfo -> ExpS -> [PatS] -> [DeclS] -> [DeclS] -> WST ExpS
-  addDecl srcsp v ps bs acc = do
-    (n:ns, _) <- ST.get
-    ST.put . (ns,) . (:acc) $
-      (A.FunBind srcsp [ A.Match sp (A.Ident sp n) ps (A.UnGuardedRhs sp
-                         $ if null bs 
-                           then v 
-                           else A.Let sp (A.BDecls sp bs) v) Nothing ])
-    return $ mkPlain n
 
 unPlain :: A.Exp t -> String
 unPlain (A.Var _ (A.UnQual _ (A.Ident _ n))) = n
@@ -376,40 +337,6 @@ letBinds = lens getBinds setBinds
   getBinds (A.Let _ (A.BDecls _ xs) _) = xs
   setBinds xs (A.Let a (A.BDecls b _) c) = A.Let a (A.BDecls b xs) c
 
-type DeclMap = M.Map String DeclS
-
-declMap :: [DeclS] -> DeclMap
-declMap = M.fromList . map (get funName &&& id)
-
-declChildVars :: DeclS -> [String]
-declChildVars = filter (isPrefixOf "__") . freeEVars . get funExpr
-
-declChildren :: DeclS -> DeclMap -> [DeclS]
-declChildren d m = catMaybes . map (`M.lookup` m) $ declChildVars d
-
--- TODO: More efficient impl?
-declParents :: DeclS -> DeclMap -> [DeclS]
-declParents d = filter (elem (get funName d). declChildVars) . M.elems
-
--- Substitute each found instance of the (first, ) with the ( , second)
-substExpr :: forall a. Data a
-          => [(ExpS, ExpS)] -> a -> a
-substExpr subs = gmapT (substExpr subs) `extT` doExp
- where
-  getMatches e = map snd $ filter ((e A.=~=) . fst) subs
-  doExp (getMatches -> (x:_)) = x
-  doExp x = gmapT (substExpr subs) x
-
-
--- Recursively substitute the given expression subtrees with undefined
-undefDecls :: [String] -> [(String, DeclS)] -> [(String, DeclS)]
-undefDecls [] ys = ys
-undefDecls xs ys = undefDecls (concatMap (declChildVars . snd) removed)
-                 . substExpr (map ((, mkPlain "undefined") . mkPlain) xs)
-                 $ remaining
- where
-  (removed, remaining) = partition ((`elem` xs) . fst) ys
-  
 funcAsExp :: DeclS -> ExpS
 funcAsExp d = A.Let sp (A.BDecls sp [d]) (mkPlain $ get funName d)
 
@@ -474,7 +401,7 @@ cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
   doType :: Type -> STT Type
   doType (TyForall bnds ctx t) = do
     (_, old) <- ST.get
-    bs <- maybeM (mapM doBind) bnds
+    bs <- maybeM bnds $ mapM doBind
     cx <- rec ctx
     t' <- rec t
     whenJust bs $ mapM_ (removeVar old . fst)
@@ -492,34 +419,43 @@ specializeTypes m t = rec t
   doName ((`M.lookup` m). prettyPrint -> Just t') = t'
   doName t = gmapT rec t
 
-
 preserveContext :: Monad m => (Type -> m Type) -> Type -> m Type
 preserveContext f (TyForall bnds ctx t) = f t >>= return . TyForall bnds ctx
 preserveContext f t = f t
 
-splitFunc :: Type -> [Type]
-splitFunc (TyFun a b) = a : splitFunc b
-splitFunc t = [t]
 
-splitApp :: Type -> [Type]
-splitApp = reverse . helper
+splitTApp :: Type -> [Type]
+splitTApp = reverse . helper
  where
   helper (TyApp a b) = b : helper a
   helper t = [t]
 
--- Precondition for semantically correct splitting: type is cannonicalized
--- TODO: we aren't using it that way currently... add in forall shadowing stuff
-splitType :: Type -> [Type]
-splitType (TyForall bnds ctx t) = map (addCtx ctx) $ splitType t
-splitType t@(TyVar _) = [t] 
-splitType t@(TyCon _) = [t] 
-splitType t@(TyInfix _ n _) = [TyCon n]
--- ignore the higher-kinded parts for now
-splitType t@(TyApp _ r) = splitType r
-splitType t = concat $ gmapQ (const [] `extQ` splitType) t
+buildTApp :: [Type] -> Type
+buildTApp = helper . reverse
+ where
+  helper [t] = t
+  helper (b : a) = TyApp (helper a) b
 
-listAll :: forall b c. (Data b) => (forall a. (Data a) => a -> [c]) -> b -> [c]
-listAll f = concat . gmapQ (\n -> f n ++ listAll f n)
+splitEApp :: ExpS -> [ExpS]
+splitEApp = reverse . helper
+ where
+  helper (A.App _ a b) = b : helper a
+  helper t = [t]
+
+buildEApp :: [ExpS] -> ExpS
+buildEApp = helper . reverse
+ where
+  helper [t] = t
+  helper (b : a) = A.App sp (buildEApp a) b
+
+splitTFunc :: Type -> [Type]
+splitTFunc (TyFun a b) = a : splitTFunc b
+splitTFunc t = [t]
+
+buildTFunc :: [Type] -> Type
+buildTFunc [t] = t
+buildTFunc (a : b) = TyFun a (buildTFunc b)
+
 
 getVar :: Name -> [String]
 getVar (Ident n) = [n]
@@ -531,6 +467,9 @@ getVarA (A.Symbol _ n) = [n]
 
 getVars :: Data a => a -> [String]
 getVars = listAll (const [] `extQ` getVarA `extQ` getVar)
+
+listAll :: forall b c. (Data b) => (forall a. (Data a) => a -> [c]) -> b -> [c]
+listAll f = concat . gmapQ (\n -> f n ++ listAll f n)
 
 deQual :: Data a => a -> a
 deQual = gmapT (deQual `extT` doA `extT` doE)
@@ -563,7 +502,7 @@ freeTVars t = rec t
   rec :: (Data a) => a -> [String]
   rec = (concat . gmapQ (rec `extQ` freeTVars)) `extQ` getVar
 
--- Get 'primitives', tings replaceable by dot and line
+-- Get 'primitives', things replaceable by dot and line
 {-
 uniquePrims :: [Type] -> [Type]
 uniquePrims = map head . group . sort . concatMap getPrims
@@ -611,35 +550,11 @@ type NameS  = A.Name  A.SrcSpanInfo
 type PatS   = A.Pat   A.SrcSpanInfo
 type MatchS = A.Match A.SrcSpanInfo
 
-lexify :: String -> ParseResult [Loc Token]
-lexify = runParserWithMode parseMode lexRec 
- where
-  lexRec = runL (Lex lexer) (\x -> case unLoc x of
-      EOF -> return []
-      _ -> liftM (x:) lexRec)
-
-balanceParens :: [Loc Token] -> String
-balanceParens = map tokChar . (`doToks`[]) . map unLoc
- where
-  tokChar RightParen  = ')'
-  tokChar RightSquare = ']'
-  tokChar RightCurly  = '}'
-
-  doToks [] s = s
-  doToks (LeftParen :xs) s = doToks xs $ RightParen  : s
-  doToks (LeftSquare:xs) s = doToks xs $ RightSquare : s
-  doToks (LeftCurly :xs) s = doToks xs $ RightCurly  : s
-  doToks (r:xs) s
-    | r `elem` [RightParen, RightSquare, RightCurly]
-    = doToks xs $ maybe s snd $ extractFirst (==r) s
-  doToks (_:xs) s = doToks xs s
-
 instance (Eq a) => Eq (ParseResult a) where
   (ParseOk x)       == (ParseOk y)       = x == y
   (ParseFailed a x) == (ParseFailed b y) = x == y && a == b
   _ == _ = False
   
-
 -- Taken from Language.Haskell.Meta.Parse
 parseResultToEither :: ParseResult a -> Either String a
 parseResultToEither (ParseOk a) = Right a

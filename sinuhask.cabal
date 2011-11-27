@@ -19,6 +19,8 @@ executable sinu
   Other-Modules:     ErrorParser
                      Utils
                      Simple
+                     Diagrams
+                     TypeInfo
 
                      -- Hint modules
                      Language.Haskell.Interpreter
@@ -72,8 +74,13 @@ executable sinu
                      containers,
                      colour,
                      curve,
+                     data-default,
                      directory,
+                     diagrams-cairo,
+                     diagrams-core,
+                     diagrams-lib,
                      enumerator,
+                     extensible-exceptions,
                      fclabels,
                      filepath,
                      fingertree,
@@ -84,7 +91,9 @@ executable sinu
                      haskell-src,
                      haskell-src-exts,
                      hint,
+                     random,
                      rex,
+                     MonadCatchIO-mtl >= 0.2,
                      mtl,
                      old-time,
                      rounding,
@@ -92,6 +101,4 @@ executable sinu
                      template-haskell,
                      toyframework,
                      utf8-string,
-                     random,
-                     extensible-exceptions,
-                     MonadCatchIO-mtl >= 0.2
+                     value-supply
