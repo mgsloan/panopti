@@ -12,21 +12,21 @@ import Control.Arrow ((***), (&&&), first, second)
 import Control.Monad (liftM, join)
 import qualified Control.Monad.State as ST
 import Data.Data hiding (typeOf)
+import Data.Foldable (concat)
 import Data.Generics.Aliases
 import Data.Label
 import Data.List (partition, isPrefixOf)
 import qualified Data.Map as M
 import Data.Maybe
 import Graphics.ToyFramework
-import Language.Haskell.Exts (prettyPrint, Type(..), ParseResult(..), SrcLoc(..), Context)
-import qualified Language.Haskell.Exts as E
-import qualified Language.Haskell.Exts.Annotated as A
+import Language.Haskell.Exts.Annotated
 import qualified Language.Haskell.Interpreter as I
+import Prelude hiding (concat)
 import System.FilePath
 
 update s 
-  = liftM (flip (set parsed) s . join)
-   (maybeM (partialParse A.parseExp $ get code s) 
+  = liftM (flip (modify results) s . (flip ST.mplus) . join)
+   (maybeM (partialParse parseExp $ get code s) 
       $ \(expr, txt', errs) -> do
           subs <- getSubsets (whereify expr) (get chan s)
   -- TODO: make this a heuristic choice / only compute the preferred subset
@@ -38,15 +38,14 @@ update s
 
   -- Associate regions of the source code with types.
           let spanified = map (\(_,a,b,_) -> (a, M.fromList $ map (first getSpan') b)) unified
-          return . Just $ Results (get code s) txt' errs spanified
+          return . Just $ Results (get code s) txt' expr errs spanified
       )
-
 
 -- Map of declarations to names
 type DeclMap = M.Map String DeclS
 
 -- A list of declarations, with their accompanying type
-type TypedDecls = [(DeclS, Type)]
+type TypedDecls = [(DeclS, TypeS)]
 
 -- Type used for internal state in whereification
 type WST = ST.State ([String], [DeclS])
@@ -61,36 +60,39 @@ type WST = ST.State ([String], [DeclS])
 whereify :: ExpS -> (ExpS, DeclMap)
 whereify top = second (declMap . snd) $ ST.runState (rec top) (manyNames, [])
  where
-  gs = (`A.SrcSpanInfo`[]) . fromJust . getSpan
+  gs = (`SrcSpanInfo`[]) . fromJust . getSpan
   rec :: ExpS -> WST ExpS
   -- Lambdas create a declaration with an appended where clause
-  rec l@(A.Lambda _ ps e) = do
+  rec l@(Lambda _ ps e) = do
     (ns, acc) <- mutate (second $ const []) 
     v <- rec e
     (_, bs) <- ST.get
     addDecl (gs l) v ps bs acc
   -- Applying a function to  
-  rec e@(A.App _ _ _) = addDecl' (gs e) 
+  rec e@(App _ _ _) = addDecl' (gs e) 
                       =<< (liftM buildEApp . mapM rec $ splitEApp e)
   -- Variables get their  own declaration
-  rec v@(A.Var _ _) = addDecl' (gs v) v
-  rec v@(A.Paren _ e) = rec e
+  rec v@(Var _ _) = addDecl' (gs v) v
+  rec v@(Paren _ e) = rec e
   rec e = addDecl' (gs e) =<< grec e
 
+  -- Generic recursion over 
   grec :: forall a . Data a => a -> WST a
   grec = gmapM (grec `extM` rec)
 
+  -- Adds a whereless / patternless declaration
   addDecl' srcsp e = do
     (_, acc) <- ST.get
     addDecl srcsp e [] [] acc
-  addDecl :: A.SrcSpanInfo -> ExpS -> [PatS] -> [DeclS] -> [DeclS] -> WST ExpS
+   
+  addDecl :: SrcSpanInfo -> ExpS -> [PatS] -> [DeclS] -> [DeclS] -> WST ExpS
   addDecl srcsp v ps bs acc = do
     (n:ns, _) <- ST.get
     ST.put . (ns,) . (:acc) $
-      (A.FunBind srcsp [ A.Match sp (A.Ident sp n) ps (A.UnGuardedRhs sp
+      (FunBind srcsp [ Match sp (Ident sp n) ps (UnGuardedRhs sp
                          $ if null bs 
                            then v 
-                           else A.Let sp (A.BDecls sp bs) v) Nothing ])
+                           else Let sp (BDecls sp bs) v) Nothing ])
     return $ mkPlain n
 
 declMap :: [DeclS] -> DeclMap
@@ -111,7 +113,7 @@ substExpr :: forall a. Data a
           => [(ExpS, ExpS)] -> a -> a
 substExpr subs = gmapT (substExpr subs) `extT` doExp
  where
-  getMatches e = map snd $ filter ((e A.=~=) . fst) subs
+  getMatches e = map snd $ filter ((e =~=) . fst) subs
   doExp (getMatches -> (x:_)) = x
   doExp x = gmapT (substExpr subs) x
 
@@ -179,21 +181,25 @@ getTopSubset (top, dm) chan = do
   -- Attempts to get the types of a set of declarations
   getTypes :: [DeclS] -> IO (Either String TypedDecls)
   getTypes decls = do
-    let ppr = A.prettyPrint $ twhered decls
+    let ppr = prettyPrint $ twhered decls
     typ <- getType chan ppr
     return $ case typ of
       Left err -> Left (show err)
       Right typeStr -> Right $
-        case watchWith (concatMap (concatMap E.prettyPrint) . maybeToList) "tupT"
+        case watchWith (concatMap (concatMap prettyPrint) . maybeToList) "tupT"
            $ processType $ parseType typeStr of
           Just xs -> zip decls xs
           _ -> []
 
   -- Apply the context to each subcomponent, enumerate contents of tuple type
-  processType :: ParseResult Type -> Maybe [Type]
-  processType (ParseOk (TyTuple _ xs)) = Just xs
-  processType (ParseOk (TyForall bnds ctx t)) = liftM (map $ addCtx ctx)
-                                              $ processType (ParseOk t)
+  processType :: ParseResult TypeS -> Maybe [TypeS]
+  processType (ParseOk (TyTuple _ _ xs)) = Just xs
+  processType (ParseOk (TyForall _ bnds ctx t)) 
+    = liftM (map (setCtx (concat bnds) (concat $ liftM (get contextList) ctx)))
+    $ processType (ParseOk t)
+  processType (ParseOk (TyForall _ bnds _ t))
+    = processType (ParseOk t)
+  
   processType (ParseOk t) = Just [t]
   processType _ = Nothing
 
@@ -225,9 +231,9 @@ isTypeRes (TypeRes _ _) = True
 isTypeRes _ = False
 
 instance Show Resolution where
-  show (TypeRes t b) = "type " ++ A.prettyPrint (deQual t) ++ " = " ++ A.prettyPrint b
-  show (DataRes t)   = "data " ++ A.prettyPrint (deQual t)
-  show (InstRes t)   = "$(mkDummyInstance \"" ++ A.prettyPrint (deQual t) ++ "\")"
+  show (TypeRes t b) = "type " ++ prettyPrint (deQual t) ++ " = " ++ prettyPrint b
+  show (DataRes t)   = "data " ++ prettyPrint (deQual t)
+  show (InstRes t)   = "$(mkDummyInstance \"" ++ prettyPrint (deQual t) ++ "\")"
 
 unifyTypes :: TaskChan -> [String] -> TypedDecls
            -> IO (Either I.InterpreterError String, [Resolution], TypedDecls, [String])
@@ -238,9 +244,9 @@ unifyTypes chan names tdecls  = do
   (vars, comps) = partition (isVarOrLit . get funExpr . fst) tdecls
 
   isVarOrLit :: ExpS -> Bool
-  isVarOrLit (A.Var _ _) = True
-  isVarOrLit (A.IPVar _ _) = True
-  isVarOrLit (A.Lit _ _) = True
+  isVarOrLit (Var _ _) = True
+  isVarOrLit (IPVar _ _) = True
+  isVarOrLit (Lit _ _) = True
   isVarOrLit _ = False
 
   -- All of the free polymorphic variables in the declarations
@@ -250,13 +256,13 @@ unifyTypes chan names tdecls  = do
   (namesUsed, namesRemaining) = splitAt (length freeVars) names
 
   -- Create types out of the names.
-  typesUsed = [ E.TyCon . E.Qual (E.ModuleName "L") . E.Ident $ "T" ++ n 
+  typesUsed = [ TyCon sp . Qual sp (ModuleName sp "L") . Ident sp $ "T" ++ n 
               | n <- namesUsed ]
 
   -- Forward and reverse mappings of the types.
   tm  = M.fromList [(t, n) 
                    | t <- freeVars | n <- typesUsed]
-  tm' = M.fromList [(prettyPrint n, E.TyVar $ E.Ident t)
+  tm' = M.fromList [(prettyPrint n, TyVar sp $ Ident sp t)
                    | t <- freeVars | n <- typesUsed]
 
   rewrite m = map (second $ specializeTypes m)
@@ -265,13 +271,13 @@ unifyTypes chan names tdecls  = do
   -- with explicit types.
   rewritten = comps ++ map mkSig (rewrite tm vars)
    where
-    mkSig (d, t) = (set funExpr (A.ExpTypeSig sp (mkPlain "undefined") 
-                 . mustOk . A.parse $ prettyPrint t) d, t)
+    mkSig (d, t) = (set funExpr (ExpTypeSig sp (mkPlain "undefined") 
+                 . mustOk . parse $ prettyPrint t) d, t)
 
   -- Get the code for a function definition, from the rewritten declarations.
   rec (rs, ds)  = do
     let fname = "foo"
-        txt = (A.prettyPrint . mkFun fname . twhered $ map fst ds)
+        txt = (prettyPrint . mkFun fname . twhered $ map fst ds)
             ++ "\n" ++ (unlines . map show $ onubSortBy id rs)
     typ <- interpretWith chan (debugWith ("unify-state:" ++) txt) (typeOf fname)
     case typ of
@@ -279,30 +285,36 @@ unifyTypes chan names tdecls  = do
       _ -> return (typ, rs, ds)
    where
     -- Pick a type to use as the cannonical name for a synonym group
-    pickCannonical rs xs 
-        = case partition isConL xs of
-            -- Prefer constructors if there is one.
-            (xs, [h]) -> (h, xs)
-            (xs, []) -> fromJust $ extractFirst ((`elem`rs) . DataRes) xs
+    pickCannonical rs xs = case cons of
+       -- Prefer a constructor if there is one.
+       [h] -> (h, syns)
+       [] -> fromJust $ extractFirst ((`elem`rs) . DataRes) syns
+      where 
+       (syns, cons) = partition isConL
+                    . onubSortBy id
+                    $ concatMap (\(a, b) -> [a, b]) xs
 
-    isConL (TyCon (E.Qual (E.ModuleName "L") _)) = True
+    isConL (TyCon _ (Qual _ (ModuleName _ "L") _)) = True
     isConL _ = False
 
     -- Create a resolution for each kind of error, and rewrite based on type
     -- equality constraint. 
     handleErrors typ xs = do
       let (ts, rs') = partition isTypeRes $ concatMap resolve xs
-          -- Build a map from each of these to the cannonical type.
+          -- Build a map from each of these to the cannonical type
           synMap = M.fromList
+          -- Write the map for rewriting types to the cannonical
                  . concatMap (\(x, xs) -> map ((,x) . prettyPrint) xs)
-          -- Pick the cannonical type for each group.
-                 . map (pickCannonical rs . onubSortBy id . concatMap (\(a, b) -> [a, b]))
+          -- Pick a cannonical type to rewrite the others to
+                 . map (pickCannonical rs)
           -- Find all related type-synonyms
-                 $ transitivePartition (\(a, b) (a', b') -> b == b' || a == b' || b == a')
-                 [ (a, b) | TypeRes a b <- ts ]
+                 $ unionEqual [ (a, b) | TypeRes a b <- ts ]
       if null rs'
         then return (typ, rs, ds)
         else rec (rs' ++ rs, rewrite synMap ds)
+
+    unionEqual = transitivePartition 
+      (\(a, b) (a', b') -> b == b' || a == b' || b == a')
 
     resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
       TypeError (EqualityError a b _ _) _ ->
@@ -311,14 +323,13 @@ unifyTypes chan names tdecls  = do
       TypeError (InstanceError a _) _ -> [InstRes (mustOk $ parseType a)]
       _ -> []
 
-  deQualL (TyCon (E.Qual (E.ModuleName "L") x)) = Right (TyCon $ E.UnQual x)
+  deQualL (TyCon s (Qual s' (ModuleName _ "L") x)) = Right (TyCon s $ UnQual s' x)
   -- Temporary hack
-  deQualL (TyCon (E.Qual _ x)) = Left (TyCon $ E.UnQual x)
+  deQualL (TyCon s (Qual s' _ x)) = Left (TyCon s $ UnQual s' x)
   deQualL t = Left t
 
 
 -- Debugging Utilities
-
 watchTypeds :: String -> [TypedDecls] -> [TypedDecls]
 watchTypeds n = zipWith (\i -> watchTyped (n ++ show i)) [0..]
 

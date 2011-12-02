@@ -14,22 +14,22 @@ import qualified Control.Monad.State as ST
 import Data.Char (isSpace)
 import Data.Curve.Util (foldT)
 import Data.Data hiding (typeOf)
+import Data.Foldable (concat)
 import Data.Function (on)
+import Data.Generics.Aliases
 import Data.Generics.Text (gshow)
 import Data.Generics.Schemes (listify)
 import Data.IORef
 import Data.Label
-import Data.List (sort, groupBy, sortBy, findIndex, (\\), isPrefixOf, partition)
+import Data.List (sort, groupBy, sortBy, findIndex, (\\), isPrefixOf, partition, group)
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Ord (comparing)
-import Data.Generics.Aliases
 import Debug.Trace
-import Language.Haskell.Exts hiding (parseType)
-import qualified Language.Haskell.Exts.Annotated as A
+import Language.Haskell.Exts.Annotated
 import Language.Haskell.Exts.SrcLoc
 import Language.Haskell.TH.Quote
-import Prelude hiding ((.))
+import Prelude hiding ((.), concat)
 import qualified Text.Regex.PCRE.Rex as PCRE
 -- import qualified Text.Regex.PCRE.Light as PCRE
 
@@ -127,6 +127,7 @@ transitivePartition f (x:xs) = xs1' : transitivePartition f xs2'
    where
     (xs1, xs2) = partition (\x -> any (`f` x) ys) xs
 
+-- | Removes the first element matching the predicate, and yields the element.
 extractFirst :: (a -> Bool) -> [a] -> Maybe (a, [a])
 extractFirst fn [] = Nothing
 extractFirst fn (a:as) =
@@ -252,6 +253,13 @@ type Ivl = (Int, Int)
 ivlWidth :: (Int, Int) -> Int
 ivlWidth = foldT subtract
 
+ivlContains :: Ivl -> Ivl -> Bool
+ivlContains (f, t) (f', t') = f <= f' && t' <= t
+
+csort :: (a -> Ivl) -> [a] -> [a]
+csort f = sortBy $ comparing (\x -> ivlWidth $ f x)
+--csort f = sortBy $ comparing (\x -> length . filter ((`ivlContains` f x) . f))
+
 colSpan :: SrcSpan -> Ivl
 colSpan = (subtract 1 *** subtract 1) . (srcSpanStartColumn &&& srcSpanEndColumn)
 
@@ -278,11 +286,11 @@ sp = SrcSpanInfo (SrcSpan "" 0 0 0 0) [] --error "srcspan"
 
 twhered :: [DeclS] -> ExpS
 twhered funcs
-  = A.Let sp (A.BDecls sp funcs)
-  $ A.Tuple sp (map (mkPlain . get funName) funcs)
+  = Let sp (BDecls sp funcs)
+  $ Tuple sp (map (mkPlain . get funName) funcs)
 
 dwhered :: (ExpS, [DeclS]) -> ExpS
-dwhered (e, funcs) = A.Let sp (A.BDecls sp funcs) e
+dwhered (e, funcs) = Let sp (BDecls sp funcs) e
 
 mutate :: ST.MonadState s m => (s -> s) -> m s
 mutate f = do
@@ -292,41 +300,41 @@ mutate f = do
 
 -- TODO: consider writing Type information into application tree?
 
-unPlain :: A.Exp t -> String
-unPlain (A.Var _ (A.UnQual _ (A.Ident _ n))) = n
+unPlain :: Exp t -> String
+unPlain (Var _ (UnQual _ (Ident _ n))) = n
 
 mkPlain :: String -> ExpS
-mkPlain n = (A.Var sp (A.UnQual sp (A.Ident sp n)))
+mkPlain n = (Var sp (UnQual sp (Ident sp n)))
 
 mkFun :: String -> ExpS -> DeclS
-mkFun n e = A.FunBind (A.ann e)
-  [ A.Match sp (A.Ident sp n) [] (A.UnGuardedRhs sp e) Nothing ]
+mkFun n e = FunBind (ann e)
+  [ Match sp (Ident sp n) [] (UnGuardedRhs sp e) Nothing ]
 
 matchName :: MatchS :-> String
 matchName = lens getName setName
  where
-  getName (A.Match _ (A.Ident _ n) _ _ _) = n
-  setName n (A.Match b (A.Ident c _) d e f) = A.Match b (A.Ident c n) d e f
+  getName (Match _ (Ident _ n) _ _ _) = n
+  setName n (Match b (Ident c _) d e f) = Match b (Ident c n) d e f
 
 matchExpr :: MatchS :-> ExpS
 matchExpr = lens getExpr setExpr
  where
-  getExpr (A.Match _ _ _ (A.UnGuardedRhs _ e) _ ) = e
-  setExpr f (A.Match a c d (A.UnGuardedRhs b _) e) =
-            (A.Match a c d (A.UnGuardedRhs a f) e)
+  getExpr (Match _ _ _ (UnGuardedRhs _ e) _ ) = e
+  setExpr f (Match a c d (UnGuardedRhs b _) e) =
+            (Match a c d (UnGuardedRhs a f) e)
 
 funMatches :: DeclS :-> [MatchS]
 funMatches = lens getMatches setMatches
  where
-  getMatches (A.FunBind _ ms) = ms
-  setMatches ms (A.FunBind a _) = A.FunBind a ms
+  getMatches (FunBind _ ms) = ms
+  setMatches ms (FunBind a _) = FunBind a ms
 
 funName :: DeclS :-> String
 funName = lens getName setName . funMatches
  where
-  getName ((A.Match _ (A.Ident _ n) _ _ _):_) = n
-  setName n = map (\(A.Match a (A.Ident b _) c d e) ->
-                     A.Match a (A.Ident b n) c d e)
+  getName ((Match _ (Ident _ n) _ _ _):_) = n
+  setName n = map (\(Match a (Ident b _) c d e) ->
+                     Match a (Ident b n) c d e)
 
 funExpr :: DeclS :-> ExpS
 funExpr = matchExpr . headLens . funMatches
@@ -334,46 +342,36 @@ funExpr = matchExpr . headLens . funMatches
 letBinds :: ExpS :-> [DeclS]
 letBinds = lens getBinds setBinds
  where
-  getBinds (A.Let _ (A.BDecls _ xs) _) = xs
-  setBinds xs (A.Let a (A.BDecls b _) c) = A.Let a (A.BDecls b xs) c
+  getBinds (Let _ (BDecls _ xs) _) = xs
+  setBinds xs (Let a (BDecls b _) c) = Let a (BDecls b xs) c
+
+contextList :: ContextS :-> [AsstS]
+contextList = lens getList setList
+ where
+   getList (CxEmpty _) = []
+   getList (CxSingle _ a) = [a]
+   getList (CxTuple _ as) = as
+   getList (CxParen _ a) = getList a
+   setList []  c = CxEmpty  (ann c)
+   setList [a] c = CxSingle (ann c) a
+   setList as  c = CxTuple  (ann c) as
 
 funcAsExp :: DeclS -> ExpS
-funcAsExp d = A.Let sp (A.BDecls sp [d]) (mkPlain $ get funName d)
-
-{-
-The theory can be described as: The typing environment which makes a
-monomorphically-punned equivalent compile gives all of the information about the
-polymorphic expression.
-
-here's the procedure:
-
- 1) Set the whole top-level declaration to 'undefined', in order to get the
- type, in the case that an explicit type is not specified.
-
- 2) Whereify, and use recursive application of the seminal removal scheme
-
- 3) Rename all of the created definitions, and replace the old names with
- explicitly typed dummy-undefineds, which assign a unique constructor to each
- potentially unique polymorphic variable.
-
- 3) Use the type errors to incrementally guide creating a dummy typing
- environment.  The construction of this environment determines the causation of
- types within the subexpression being analyzed.
--}
+funcAsExp d = Let sp (BDecls sp [d]) (mkPlain $ get funName d)
 
 type STT = ST.State (String, M.Map String Char)
 
-cannonicalType :: Type -> Type
+cannonicalType :: TypeS -> TypeS
 cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
  where
   rec :: (Data a, Typeable a) => a -> STT a
   rec = gmapM rec
    `extM` (\n -> doName False n >>= return . snd)
-   `extM` (return :: QName -> STT QName)
+   `extM` (return :: QNameS -> STT QNameS)
    `extM` doType
 
-  doName b (Ident n)  = doVar b n >>= \n' -> return (n, Ident n')
-  doName b (Symbol n) = doVar b n >>= \n' -> return (n, Symbol n')
+  doName b (Ident s n)  = doVar b n >>= \n' -> return (n, Ident s n')
+  doName b (Symbol s n) = doVar b n >>= \n' -> return (n, Symbol s n')
 
   -- Returns the new name associated with the given variable, or creates one.
   -- The bool parameter determines if prior the prior rewrite for this variable
@@ -386,32 +384,32 @@ cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
       Nothing -> ST.put (tail xs, M.insert other (head xs) m)
               >> return [head xs]
 
-  doBind (UnkindedVar n) = do
+  doBind (UnkindedVar s n) = do
     (o, n') <- doName True n
-    return (o, UnkindedVar n')
+    return (o, UnkindedVar s n')
   
-  doBind (KindedVar n k) = do
+  doBind (KindedVar s n k) = do
     (o, n') <- doName True n
-    return (o, KindedVar n' k)
+    return (o, KindedVar s n' k)
 
   removeVar :: M.Map String Char -> String -> STT ()
   removeVar old other = ST.modify (second $ \m ->
     maybe (M.delete other m) (\v -> M.insert other v old) (M.lookup other old))
 
-  doType :: Type -> STT Type
-  doType (TyForall bnds ctx t) = do
+  doType :: TypeS -> STT TypeS
+  doType (TyForall s bnds ctx t) = do
     (_, old) <- ST.get
     bs <- maybeM bnds $ mapM doBind
     cx <- rec ctx
     t' <- rec t
     whenJust bs $ mapM_ (removeVar old . fst)
-    return $ TyForall (liftM (map snd) bs) cx t'
+    return $ TyForall s (liftM (map snd) bs) cx t'
   doType t = gmapM rec t
 
 -- NOTE: Throws away top foralls
 -- TODO: shadow nested foralls
-specializeTypes :: M.Map String Type -> Type -> Type
-specializeTypes m (TyForall _ _ t) = specializeTypes m t
+specializeTypes :: M.Map String TypeS -> TypeS -> TypeS
+specializeTypes m (TyForall s _ _ t) = specializeTypes m t
 specializeTypes m t = rec t
  where
   rec :: (Data a) => a -> a
@@ -419,118 +417,111 @@ specializeTypes m t = rec t
   doName ((`M.lookup` m). prettyPrint -> Just t') = t'
   doName t = gmapT rec t
 
-preserveContext :: Monad m => (Type -> m Type) -> Type -> m Type
-preserveContext f (TyForall bnds ctx t) = f t >>= return . TyForall bnds ctx
+preserveContext :: Monad m => (TypeS -> m TypeS) -> TypeS -> m TypeS
+preserveContext f (TyForall s bnds ctx t) = f t >>= return . TyForall s bnds ctx
 preserveContext f t = f t
 
 
-splitTApp :: Type -> [Type]
+splitTApp :: TypeS -> [TypeS]
 splitTApp = reverse . helper
  where
-  helper (TyApp a b) = b : helper a
+  helper (TyApp _ a b) = b : helper a
   helper t = [t]
 
-buildTApp :: [Type] -> Type
+buildTApp :: [TypeS] -> TypeS
 buildTApp = helper . reverse
  where
   helper [t] = t
-  helper (b : a) = TyApp (helper a) b
+  helper (b : a) = TyApp sp (helper a) b
 
 splitEApp :: ExpS -> [ExpS]
 splitEApp = reverse . helper
  where
-  helper (A.App _ a b) = b : helper a
+  helper (App _ a b) = b : helper a
   helper t = [t]
 
 buildEApp :: [ExpS] -> ExpS
 buildEApp = helper . reverse
  where
   helper [t] = t
-  helper (b : a) = A.App sp (buildEApp a) b
+  helper (b : a) = App sp (buildEApp a) b
 
-splitTFunc :: Type -> [Type]
-splitTFunc (TyFun a b) = a : splitTFunc b
+splitTFunc :: TypeS -> [TypeS]
+splitTFunc (TyFun _ a b) = a : splitTFunc b
 splitTFunc t = [t]
 
-buildTFunc :: [Type] -> Type
+buildTFunc :: [TypeS] -> TypeS
 buildTFunc [t] = t
-buildTFunc (a : b) = TyFun a (buildTFunc b)
+buildTFunc (a : b) = TyFun sp a (buildTFunc b)
 
-
-getVar :: Name -> [String]
-getVar (Ident n) = [n]
-getVar (Symbol n) = [n]
-
-getVarA :: NameS -> [String]
-getVarA (A.Ident _ n) = [n]
-getVarA (A.Symbol _ n) = [n]
+getVar :: NameS -> [String]
+getVar (Ident _ n) = [n]
+getVar (Symbol _ n) = [n]
 
 getVars :: Data a => a -> [String]
-getVars = listAll (const [] `extQ` getVarA `extQ` getVar)
+getVars = listAll (const [] `extQ` getVar)
 
 listAll :: forall b c. (Data b) => (forall a. (Data a) => a -> [c]) -> b -> [c]
 listAll f = concat . gmapQ (\n -> f n ++ listAll f n)
 
 deQual :: Data a => a -> a
-deQual = gmapT (deQual `extT` doA `extT` doE)
+deQual = gmapT (deQual `extT` doA)
  where
-  doA :: A.QName SrcSpanInfo-> A.QName SrcSpanInfo
-  doA (A.Qual s a b) = A.UnQual s b
+  doA :: QNameS -> QNameS
+  doA (Qual s a b) = UnQual s b
   doA x = x
-  doE (Qual a b) = UnQual b
-  doE x = x
 
 reQual :: Data a => String -> a -> a
 reQual n = gmapT (reQual n `extT` doE)
  where
-  doE (UnQual a) = Qual (ModuleName n) a
+  doE (UnQual s a) = Qual s (ModuleName sp n) a
   doE x = x
 
 -- Free variables in the expression.
 freeEVars :: ExpS -> [String]
-freeEVars (A.Lambda _ vs e) = freeEVars e \\ getVars vs
+freeEVars (Lambda _ vs e) = freeEVars e \\ getVars vs
 freeEVars e = rec e
  where
   rec :: (Data a) => a -> [String]
-  rec = (concat . gmapQ (rec `extQ` freeEVars)) `extQ` getVarA
+  rec = (concat . gmapQ (rec `extQ` freeEVars)) `extQ` getVar
 
 -- Free polymorphic variables in the type.
-freeTVars :: Type -> [String]
-freeTVars (TyForall bnds _ t) = freeTVars t \\ getVars bnds
+freeTVars :: TypeS -> [String]
+freeTVars (TyForall _ bnds _ t) = freeTVars t \\ getVars bnds
 freeTVars t = rec t
  where
   rec :: (Data a) => a -> [String]
   rec = (concat . gmapQ (rec `extQ` freeTVars)) `extQ` getVar
 
--- Get 'primitives', things replaceable by dot and line
-{-
-uniquePrims :: [Type] -> [Type]
+-- All of the named things - variables and constructors.
+uniquePrims :: [TypeS] -> [TypeS]
 uniquePrims = map head . group . sort . concatMap getPrims
-isPrim :: Type -> Bool
-isPrim t@(TyVar _) = True
-isPrim t@(TyCon _) = True
-isPrim _ = False
-getPrims :: Type -> [Type]
+
+getPrims :: TypeS -> [TypeS]
 getPrims = listify isPrim
--}
+
+isPrim :: TypeS -> Bool
+isPrim t@(TyVar _ _) = True
+isPrim t@(TyCon _ _) = True
+isPrim _ = False
+
+type BindS = [TyVarBind SrcSpanInfo]
 
 -- TODO: transitive closure on polymorphic var usage..
-addCtx :: [Asst] -> Type -> Type
-addCtx [] t = t
-addCtx ctx t = uncurry3 TyForall
-             . second3 (++ (map snd . filter (overlaps $ freeTVars t)
-                                    $ map (\a -> (getVars a, a)) ctx))
-             $ case t of
-               f@(TyForall b c i) -> (b, c, i)
-               t -> (Nothing, [], t)
+setCtx :: BindS -> [AsstS] -> TypeS -> TypeS
+setCtx [] [] t = t
+setCtx bnds ctx t 
+  = case t of
+      (TyForall _ _ _ t') -> setCtx bnds ctx t'
+      _ -> TyForall l (Just usedBnds) (Just $ CxTuple l usedAssts) t
  where
-  overlaps xs (ys, _) = any (`elem` ys) xs
-  
+  l = ann t
+  overlaps xs ys = any (`elem` ys) xs
+  usedAssts = [ c | c <- ctx,  overlaps (getVars c) (freeTVars t) ]
+  usedBnds  = [ b | b <- bnds, overlaps (getVars b) (freeTVars t) ]
+ 
 getExp :: (Data a) => a -> Maybe ExpS
 getExp = (const Nothing) `extQ` Just
-
-ivlContains :: Ivl -> Ivl -> Bool
-ivlContains (f, t) (f', t') = f <= f' && t' <= t
 
 atSpan :: (Data a) => Ivl -> a -> Maybe ExpS
 atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
@@ -544,11 +535,16 @@ atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
   child :: (Data x) => x -> Maybe ExpS
   child x = ifContains (msum $ gmapQ (atSpan s) x) x
 
-type ExpS   = A.Exp   A.SrcSpanInfo
-type DeclS  = A.Decl  A.SrcSpanInfo
-type NameS  = A.Name  A.SrcSpanInfo 
-type PatS   = A.Pat   A.SrcSpanInfo
-type MatchS = A.Match A.SrcSpanInfo
+-- Convenient aliases for annotated AST types
+type ExpS     = Exp     SrcSpanInfo
+type DeclS    = Decl    SrcSpanInfo
+type NameS    = Name    SrcSpanInfo 
+type PatS     = Pat     SrcSpanInfo
+type MatchS   = Match   SrcSpanInfo
+type TypeS    = Type    SrcSpanInfo
+type ContextS = Context SrcSpanInfo
+type AsstS    = Asst    SrcSpanInfo
+type QNameS   = QName   SrcSpanInfo
 
 instance (Eq a) => Eq (ParseResult a) where
   (ParseOk x)       == (ParseOk y)       = x == y
@@ -561,9 +557,6 @@ parseResultToEither (ParseOk a) = Right a
 parseResultToEither (ParseFailed loc e)
   = let line = srcLine loc - 1
     in Left (unlines [show line,show loc,e])
-
-parseType :: String -> ParseResult Type
-parseType = parseTypeWithMode parseMode
 
 parseMode :: ParseMode
 parseMode = ParseMode "" extensions False False (Just baseFixities)
