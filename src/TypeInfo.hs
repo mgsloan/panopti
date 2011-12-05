@@ -195,7 +195,7 @@ getTopSubset (top, dm) chan = do
   processType :: ParseResult TypeS -> Maybe [TypeS]
   processType (ParseOk (TyTuple _ _ xs)) = Just xs
   processType (ParseOk (TyForall _ bnds ctx t)) 
-    = liftM (map (setCtx (concat bnds) (concat $ liftM (get contextList) ctx)))
+    = liftM (map (setCtx (concat bnds) (get contextList ctx)))
     $ processType (ParseOk t)
   processType (ParseOk (TyForall _ bnds _ t))
     = processType (ParseOk t)
