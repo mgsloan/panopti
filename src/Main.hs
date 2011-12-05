@@ -46,10 +46,10 @@ handleDisplay :: DrawWindow -> IPnt -> IRect -> State -> C.Render State
 handleDisplay dw _ _ s@(State txt ix user p c mouse _ _ _ _) = do
   let textPos = (50.5, 200.5)
 
-  C.liftIO $ stateDiagram s
-         >>= fst
+  C.liftIO $ fst
            . renderDia Cairo (CairoOptions "" (GTK dw Nothing False))
            . scale 10
+           =<< stateDiagram s
 
   return s
 

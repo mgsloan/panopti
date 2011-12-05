@@ -155,6 +155,8 @@ gdebug x = trace (gshow x) x
 gdebug' :: Data a => String -> a -> a
 gdebug' pre x = trace (pre ++ gshow x) x
 
+pdebug' pre x = trace (pre ++ prettyPrint x) x
+
 -- | Conditionally run an action, using a @Maybe a@ to decide.
 whenJust :: Monad m => Maybe a -> (a -> m ()) -> m ()
 whenJust mg f = maybe (return ()) f mg
@@ -345,16 +347,17 @@ letBinds = lens getBinds setBinds
   getBinds (Let _ (BDecls _ xs) _) = xs
   setBinds xs (Let a (BDecls b _) c) = Let a (BDecls b xs) c
 
-contextList :: ContextS :-> [AsstS]
+contextList :: Maybe ContextS :-> [AsstS]
 contextList = lens getList setList
  where
-   getList (CxEmpty _) = []
-   getList (CxSingle _ a) = [a]
-   getList (CxTuple _ as) = as
-   getList (CxParen _ a) = getList a
-   setList []  c = CxEmpty  (ann c)
-   setList [a] c = CxSingle (ann c) a
-   setList as  c = CxTuple  (ann c) as
+   getList Nothing = []
+   getList (Just (CxEmpty _)) = []
+   getList (Just (CxSingle _ a)) = [a]
+   getList (Just (CxTuple _ as)) = as
+   getList (Just (CxParen _ a)) = getList $ Just a
+   setList []  c = Just $ CxEmpty  (maybe sp ann c)
+   setList [a] c = Just $ CxSingle (maybe sp ann c) a
+   setList as  c = Just $ CxTuple  (maybe sp ann c) as
 
 funcAsExp :: DeclS -> ExpS
 funcAsExp d = Let sp (BDecls sp [d]) (mkPlain $ get funName d)
@@ -557,6 +560,8 @@ parseResultToEither (ParseOk a) = Right a
 parseResultToEither (ParseFailed loc e)
   = let line = srcLine loc - 1
     in Left (unlines [show line,show loc,e])
+
+parseIt = parseWithMode parseMode
 
 parseMode :: ParseMode
 parseMode = ParseMode "" extensions False False (Just baseFixities)
