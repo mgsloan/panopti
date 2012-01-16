@@ -1,3 +1,5 @@
+-- From ActiveHS (c) Péter Diviánszky
+
 {-# LANGUAGE RankNTypes, ExistentialQuantification, ScopedTypeVariables, PatternGuards, FlexibleContexts #-}
 
 module Simple

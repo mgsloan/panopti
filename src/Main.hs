@@ -2,7 +2,7 @@
 TupleSections, ParallelListComp #-}
 
 import Brace
-import Diagrams
+import ExprDiagrams
 import ErrorParser
 import Input
 import PartialParse
@@ -32,7 +32,8 @@ main = do
   chan <- startGHCiServer [sourceDir] print print
   (stateRef, loop) <- runToyState $ Toy
     { initialState =
-        State "map (+1) . map (*2) $ (filter isSpace $ tail \"hello world\")"
+        --State "map (+1) . map (*2) $ (filter isSpace $ tail \"hello world\")"
+        State "(\\x -> x + 1) 5"
               (0, 0) Normal Nothing chan (0, 220) 0 undefined [] []
     , mouse   = const $ setM mousePos
     , key     = handleKey' setTimeout

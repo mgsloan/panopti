@@ -23,9 +23,9 @@ import Language.Haskell.Exts.ParseMonad
 
 partialParse 
   :: (Show a, Eq a)
-  => (String -> ParseResult a)  -- ^ Parsing function
-  -> String                     -- ^ String to run it on
-  -> Maybe (a, String, [Error]) -- ^ A resolution to force parsing, if found
+  => (String -> ParseResult a)            -- ^ Parsing function
+  -> String                               -- ^ String to run it on
+  -> Maybe (a, String, [ParseResolution]) -- ^ A resolution to force parsing, if found
 partialParse f t0 = rec 10 Nothing t0
  where
   rec 0 _ _ = Nothing
@@ -39,19 +39,18 @@ partialParse f t0 = rec 10 Nothing t0
     handleError err@(ParseFailed l e)
 
 -- Include a record of the error that required resolution.
-      = liftM (third3 ((ivl, e):))
+      = liftM (third3 ((errorEdits, e):))
 
 -- Solve any further errors, passing in the current one to avoid re-attempting
 -- an ineffective fix to the same error.
       . rec (limit - 1) (Just err) 
 
 -- Attempt to resolve the error, if possible.
-      $ applyEdits (errorEdits e) txt
+      $ applyEdits errorEdits txt
 
      where
-
 -- Maps error messages to a naive edit to attempt as a resolution.
-      errorEdits e
+      errorEdits
         | "Parse error: EOF"             `isPrefixOf` e = [(eivl, balanced)]
         | "Improperly terminated string" `isPrefixOf` e = [(eivl, "\"")]
         | "Unterminated nested comment"  `isPrefixOf` e = [(eivl, "-}")]

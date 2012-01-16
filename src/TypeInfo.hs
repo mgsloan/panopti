@@ -24,22 +24,88 @@ import qualified Language.Haskell.Interpreter as I
 import Prelude hiding (concat)
 import System.FilePath
 
+{- We need to be able to achieve the following tasks with the static
+representation of the code:
+
+  * Create a pretty-printed representation of the parseable portions.
+
+  This is achieved by including the expression subtrees in the results. One
+issue is that resolved types have a lot of redundancy.  We want to store this
+redundancy in order to enable simpler projections of the type information in
+the result-drawing stage, as we will want to restrict / summarize the
+information in a user customizable fashion.
+
+  * Have some way of inter-relating the types within the drawing.
+
+  This is done in a (hopefully) reasonably user reconfigureable /
+understandeable / extensible way by labelling the types with tags that will be
+preserved as labels in the diagram drawing stage.  These labels will initially
+be stored in a fashion that gives the application structure of the expression.
+
+ * Make it possible to flexibly extend this system, based on a relatively
+compact, understandeable kernel (XMonad style)
+
+  The user will then be able to overload two functions, which determine how to
+draw each component of the expression, as well as each component of the type-
+signatures.  This will allow for layering extensions and configurations to
+display code and types in the way that they wish.  An interesting possibility
+for an extension in this system would be to encode pretty synonyms / more
+mnemonic representations in an extra module in cabal packages.
+
+  * Show the modifications performed on the code to make it compile
+(immediately below the code).
+
+  * Eventually: Store a cached version of the rendering.  This way, the fresh
+results can be diffed with the existing visualization.  Better yet, this
+makes it even more likely for smoothly animated transitions to happen.
+
+  * Long-way out feature: Check when editing a subset changes its calculated
+type, and only then recalculate subsets.
+-}
+
 update s 
-  = liftM (flip (modify results) s . (flip ST.mplus) . join)
-   (maybeM (partialParse parseExp $ get code s) 
-      $ \(expr, txt', errs) -> do
-          subs <- getSubsets (whereify expr) (get chan s)
+  = liftM (\r -> modify results (`ST.mplus` join r) s)
+          (maybeM (partialParse parseExp $ get code s) processParsed)
+ where
+  processParsed (expr, txt', errs) = do
+    subs <- getSubsets (whereify expr) (get chan s)
   -- TODO: make this a heuristic choice / only compute the preferred subset
-          let pickedSubset = head subs
+    let pickedSubset = head subs
 
   -- Unify subsets, ensuring that disjoint subsets have different type names
-          unified <- scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns)
-                           (undefined, [], [], manyNames) pickedSubset
+    unified <- scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns)
+                     (undefined, [], [], manyNames) pickedSubset
 
   -- Associate regions of the source code with types.
-          let spanified = map (\(_,a,b,_) -> (a, M.fromList $ map (first getSpan') b)) unified
-          return . Just $ Results (get code s) txt' expr errs spanified
-      )
+    return . Just $ Results (get code s) txt' expr errs
+           $ map (\(_,a,b,_) -> (a, M.fromList $ map (first getSpan') b)) unified
+
+-- A sequence of chunks make up a code diagram.  Each code chunk enumerates
+-- every expression tree + type known at that juncture
+data Chunk = CodeChunk [(ExpS, TypeS, Maybe ChunkLabel)]
+           | OmitChunk String
+
+type ChunkLabel = (Int, Int)
+
+data TypeDiagramSpec = TypeDiagramSpec
+  { _chunks :: M.Map ChunkLabel Chunk
+  , _chunkSequence :: [ChunkLabel]
+  , _resolutions :: [TypeResolution]
+  }
+
+processParsed :: (ExpS, String, [ParseResolution]) -> TaskChan -> IO TypeDiagramSpec
+processParsed (expr, txt', res) = do
+    subs <- getSubsets (whereify expr) (get chan s)
+  -- TODO: make this a heuristic choice / only compute the preferred subset
+    let pickedSubset = head subs
+
+  -- Unify subsets, ensuring that disjoint subsets have different type names
+    unified <- scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns)
+                     (undefined, [], [], manyNames) pickedSubset
+
+  -- Associate regions of the source code with types.
+    return . Just $ Results (get code s) txt' expr errs
+           $ map (\(_,a,b,_) -> (a, M.fromList $ map (first getSpan') b)) unified
 
 -- Map of declarations to names
 type DeclMap = M.Map String DeclS
@@ -126,21 +192,32 @@ undefDecls xs ys = undefDecls (concatMap (declChildVars . snd) removed)
  where
   (removed, remaining) = partition ((`elem` xs) . fst) ys
  
--- | Gets all possible breakdowns into validly-typeable subsets
-getSubsets :: (ExpS, DeclMap) -> TaskChan -> IO [[TypedDecls]]
+-- | Gets all possible breakdowns into validly-typeable subsets.
+--TODO: use unsafeInterleaveIO to export this same interface, but lazily
+--compute the ambiguous possibilities
+getSubsets 
+  :: (String, DeclMap) -- ^ Variable referencing the top of the decl-tree.
+  -> TaskChan          -- ^ Task chan for driving Haskell interpreter.
+  -> IO [[TypedDecls]] -- ^ List of potential partitionings.
 getSubsets p chan = recurse p
  where
-  recurse :: (ExpS, DeclMap) -> IO [[TypedDecls]]
+  -- Finds a typeable subset rooted at the given name.
+  recurse :: (String, DeclMap) -> IO [[TypedDecls]]
   recurse arg@(r, dm) | M.null dm = return []
                       | otherwise = do
     --putStrLn $ unlines . map prettyPrint $ M.elems dm
     results <- getTopSubset arg chan
     if null results
       then return []
-      else mapM (\xs -> liftM (xs:) . recurse'
+      else mapM (\xs -> liftM (xs:) 
+                      . recurse'
                       . foldr M.delete dm 
                       $ map (get funName . fst) xs
-                ) $ watchTypeds (prettyPrint r) results
+                ) $ watchTypeds r results
+
+  -- This implementation is a little bit backwards.  These mutually recursive
+  -- functions figure out information that's apparent in the recursion of 
+  -- getTopSubset - which tree was removed.
 
   recurse' :: DeclMap -> IO [TypedDecls]
   recurse' dm
@@ -156,7 +233,7 @@ getTopSubset (top, dm) chan = do
    case types of
      Left err -> watch' ("top " ++ err) err
                . maybe (return []) derefChildren
-               $ M.lookup (head . getVars $ top) dm
+               $ M.lookup top dm
      Right xs -> return [xs]
  where
   -- Removes declarations that the passed declaration references, and
@@ -230,13 +307,13 @@ definition, and having it re-parsed.
 isTypeRes (TypeRes _ _) = True
 isTypeRes _ = False
 
-instance Show Resolution where
+instance Show TypeResolution where
   show (TypeRes t b) = "type " ++ prettyPrint (deQual t) ++ " = " ++ prettyPrint b
   show (DataRes t)   = "data " ++ prettyPrint (deQual t)
   show (InstRes t)   = "$(mkDummyInstance \"" ++ prettyPrint (deQual t) ++ "\")"
 
 unifyTypes :: TaskChan -> [String] -> TypedDecls
-           -> IO (Either I.InterpreterError String, [Resolution], TypedDecls, [String])
+           -> IO (Either I.InterpreterError String, [TypeResolution], TypedDecls, [String])
 unifyTypes chan names tdecls  = do
   (typ, rs, ds) <- rec (map DataRes typesUsed, tdecls)
   return (typ, rs, rewrite tm' ds, namesRemaining)
@@ -260,9 +337,9 @@ unifyTypes chan names tdecls  = do
               | n <- namesUsed ]
 
   -- Forward and reverse mappings of the types.
-  tm  = M.fromList [(t, n) 
+  tm  = M.fromList [ (t, n) 
                    | t <- freeVars | n <- typesUsed]
-  tm' = M.fromList [(prettyPrint n, TyVar sp $ Ident sp t)
+  tm' = M.fromList [ (prettyPrint n, TyVar sp $ Ident sp t)
                    | t <- freeVars | n <- typesUsed]
 
   rewrite m = map (second $ specializeTypes m)
@@ -279,12 +356,12 @@ unifyTypes chan names tdecls  = do
     let fname = "foo"
         txt = (prettyPrint . mkFun fname . twhered $ map fst ds)
             ++ "\n" ++ (unlines . map show $ onubSortBy id rs)
-    typ <- interpretWith chan (debugWith ("unify-state:" ++) txt) (typeOf fname)
+    typ <- interpretWith chan txt $ typeOf fname
     case typ of
       Left (I.WontCompile xs) -> handleErrors typ xs
       _ -> return (typ, rs, ds)
    where
-    -- Pick a type to use as the cannonical name for a synonym group
+    -- Pick a type to use as the cannonical name for a synonym group.
     pickCannonical rs xs = case cons of
        -- Prefer a constructor if there is one.
        [h] -> (h, syns)

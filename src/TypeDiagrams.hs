@@ -12,7 +12,6 @@ import Data.List (intersperse, sort)
 import Data.Maybe (catMaybes)
 import Data.Monoid (Monoid)
 import Data.Supply
-import Debug.Trace
 import Diagrams.Prelude hiding ((===), (|||))
 import Diagrams.Backend.Cairo.CmdLine
 import Diagrams.TwoD.Text(Text(..))
@@ -114,12 +113,26 @@ infixl 6 |||
 x === y = vsep [x, y]
 x ||| y = hsep [x, y]
 
-text' :: (Renderable (Path R2) b, Renderable Text b) 
-      => String -> Diagram b R2
-text' xs = text xs # setBounds bnds # fillColor forestgreen
+setRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
+setRectBounds r2 = setBounds bnds
  where
   bnds = getBounds $ centerXY $ Path
-    [ (P zeroV, ltrail [ (1 * (fromIntegral $ length xs), 2) ] False) ]
+    [ (P zeroV, ltrail [ r2 ] False) ]
+
+expandRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
+expandRectBounds (x, y) d = setRectBounds (width d + x, height d + y) d
+
+stext :: (Renderable (Path R2) b, Renderable Text b) 
+      => Double -> String -> Diagram b R2
+stext sz txt = text txt
+             # fontSize sz
+             # setRectBounds ((sz * 0.5 * fromIntegral (length txt), sz))
+             
+text' :: (Renderable (Path R2) b, Renderable Text b) 
+      => String -> Diagram b R2
+text' xs = text xs 
+         # setRectBounds (1 * (fromIntegral $ length xs), 2)
+         # fillColor forestgreen
 
 arrow :: ( Floating (Scalar t)
          , Num t
@@ -168,8 +181,13 @@ cross v = Path [ (P v,      Trail [Linear $ v ^* (-2)] False)
                , (P $ cw v, Trail [Linear $ ccw (v ^* 2)]     False)
                ]
 
-lined = lineWidth 0.3 . stroked
-bar d = (lined . hrule $ width d) === centerX d
+lined = lineWidth 1 . stroked
+barTop d    = (lined . hrule $ width d) 
+               ===
+              centerX d
+barBottom d = centerX d 
+               ===
+              (lined . hrule $ width d)
 
 typeDiagram :: IsName t
   => t
@@ -177,7 +195,7 @@ typeDiagram :: IsName t
   -> UserDiagram
   -> TypeS
   -> CDiagram
-typeDiagram pre dm usr = rec [] . debug' "ty "
+typeDiagram pre dm usr = rec []
  where
   prim ident s
     = case M.lookup ident dm of

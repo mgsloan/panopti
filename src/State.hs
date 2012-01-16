@@ -15,9 +15,22 @@ import System.Glib.MainLoop (HandlerId, timeoutRemove, timeoutAdd)
 -- (function span, full expression's span, [argument spans])
 type Apps = [(Ivl, Ivl, [Ivl])]
 type TypeMap = Map Ivl TypeS
-type Error = (Ivl, String)
+type ParseResolution = (Ivl, String)
 
-data Resolution
+-- A sequence of chunks make up a code diagram.  Each code chunk enumerates
+-- every expression tree + type known at that juncture
+data Chunk = CodeChunk [(ExpS, TypeS, Maybe ChunkLabel)]
+           | OmitChunk String
+
+type ChunkLabel = (Int, Int)
+
+data TypeDiagramSpec = TypeDiagramSpec
+  { _chunks :: M.Map ChunkLabel Chunk
+  , _chunkSequence :: [ChunkLabel]
+  , _resolutions :: [TypeResolution]
+  }
+
+data TypeResolution
   = DataRes { resType :: TypeS }
   | TypeRes { resType, targType :: TypeS }
   | InstRes { resType :: TypeS }

@@ -424,7 +424,6 @@ preserveContext :: Monad m => (TypeS -> m TypeS) -> TypeS -> m TypeS
 preserveContext f (TyForall s bnds ctx t) = f t >>= return . TyForall s bnds ctx
 preserveContext f t = f t
 
-
 splitTApp :: TypeS -> [TypeS]
 splitTApp = reverse . helper
  where

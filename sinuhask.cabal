@@ -19,7 +19,8 @@ executable sinu
   Other-Modules:     ErrorParser
                      Utils
                      Simple
-                     Diagrams
+                     TypeDiagrams
+                     ExprDiagrams
                      TypeInfo
 
                      -- Hint modules
