@@ -2,7 +2,7 @@
 
 {-# LANGUAGE RankNTypes, ExistentialQuantification, ScopedTypeVariables, PatternGuards, FlexibleContexts #-}
 
-module Simple
+module ActiveHs.Simple
     ( IError(..), Task (..), TaskChan
     , startGHCiServer
     , restartGHCiServer

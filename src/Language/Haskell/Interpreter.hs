@@ -37,7 +37,7 @@ module Language.Haskell.Interpreter(
     -- In the snippets below we use \'LBRACE\' and \'RBRACE\'
     -- to mean \'{\' and \'}\' respectively. We cannot put the
     -- pragmas inline in the code since GHC scarfs them up.
-    getModuleAnnotations, getValAnnotations,
+--    getModuleAnnotations, getValAnnotations,
 #endif
     -- ** Type inference
      typeOf, typeChecks, kindOf,

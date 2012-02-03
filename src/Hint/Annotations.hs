@@ -2,7 +2,7 @@
 -- - requires GHC >= 6.11
 --
 -- austin seipp <as@nijoruj.org>
-module Hint.Annotations
+module Hint.Annotations where {-
 ( getModuleAnnotations -- :: (Data a, MonadInterpreter m) => a -> String -> m [a]
 , getValAnnotations    -- :: (Data a, MonadInterpreter m) => a -> String -> m [a]
 ) where
@@ -70,3 +70,4 @@ getValAnnotations _ x = do
 
 anns :: (MonadInterpreter m, Data a) => AnnTarget GHC.Name -> m [a]
 anns = runGhc1 (GHC.findGlobalAnns deserializeWithData)
+-}
