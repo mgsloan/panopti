@@ -1,6 +1,8 @@
 {-# LANGUAGE FlexibleContexts, TypeFamilies, ViewPatterns, TupleSections #-}
 
-module TypeDiagrams where
+module TypeDiagrams
+  ( typeDiagram
+  , lined, arrow ) where
 
 import Control.Monad
 import Control.Arrow ((&&&), second)
@@ -12,9 +14,10 @@ import Data.List (intersperse, sort)
 import Data.Maybe (catMaybes)
 import Data.Monoid (Monoid)
 import Data.Supply
-import Diagrams.Prelude hiding ((===), (|||))
+import Diagrams.Prelude hiding ((===), (|||), trim)
 import Diagrams.Backend.Cairo.CmdLine
 import Diagrams.TwoD.Text(Text(..))
+import Graphics.UI.Gtk.Toy.Diagrams
 import Prelude hiding (concat)
 import Utils
 import Language.Haskell.Exts.Annotated
@@ -33,7 +36,7 @@ popSupply r = unsafePerformIO $ do
   writeIORef r val'
   return (supplyValue val)
 
-coloredShapes :: [String] -> M.Map String CDiagram
+coloredShapes :: [String] -> M.Map String CairoDiagram
 coloredShapes names
   = M.fromList 
   . zip names
@@ -50,22 +53,20 @@ main = do
       squig _ xs = Just $ (lined (squiggle 1) # alignT ||| vsep xs # alignT)
       usr = matchContext (parseT "Arrow a => a") (gtDraw squig)
 --      usr r a t = r a t
-  let dia = fontSize 2 -- . showLabels -- . fontSize 10
+  let dia = fontSize 0.5 -- . showLabels -- . fontSize 10
           $ typeDiagram (0 :: Int) (coloredShapes $ map (:[]) ['a'..]) usr (snd $ tys !! 0)
       bg = fc white $ rect (20 + width dia) (20 + height dia)
   defaultMain ((centerXY dia) `atop` (centerXY bg))
  where
   parseT = mustOk . parseIt
 
-type CDiagram = AnnDiagram Cairo R2 Any
+type TypeDiagram = [AsstS] -> TypeS -> CairoDiagram
 
-type TypeDiagram = [AsstS] -> TypeS -> CDiagram
-
-type UserDiagram = TypeDiagram -> [AsstS] -> [TypeS] -> Maybe CDiagram
+type UserDiagram = TypeDiagram -> [AsstS] -> [TypeS] -> Maybe CairoDiagram
 
 -- Utility to convert a function from a Type and its arguments into a
 -- UserDiagram.
-gtDraw :: (TypeS -> [CDiagram] -> Maybe CDiagram) -> UserDiagram
+gtDraw :: (TypeS -> [CairoDiagram] -> Maybe CairoDiagram) -> UserDiagram
 gtDraw f g as (t:ts) = f t $ map (g as) ts
 
 -- Applies to primitives that posess a similar context as the given type
@@ -93,18 +94,18 @@ ltrail = Trail . map Linear
 scaleXY (x, y) = scaleX x . scaleY y
 
 hsep, vsep
-  :: (HasOrigin a, Boundable a, Monoid a, V a ~ (Double, Double))
+  :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
   => [a] -> a
 hsep = hcat' (def {sep = 0.5})
 vsep = vcat' (def {sep = 1})
 
 hsep', vsep' 
-  :: (HasOrigin a, Boundable a, Monoid a, V a ~ (Double, Double))
+  :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
   => Double -> [a] -> a
 hsep' s = hcat' (def {sep = s})
 vsep' s = vcat' (def {sep = s})
 
-stroked :: Path R2 -> CDiagram
+stroked :: Path R2 -> CairoDiagram
 stroked = stroke' (def { vertexNames = [] :: [[Int]] })
 
 infixl 6 ===
@@ -191,10 +192,10 @@ barBottom d = centerX d
 
 typeDiagram :: IsName t
   => t
-  -> M.Map String (AnnDiagram Cairo R2 Any)
+  -> M.Map String CairoDiagram
   -> UserDiagram
   -> TypeS
-  -> CDiagram
+  -> CairoDiagram
 typeDiagram pre dm usr = rec []
  where
   prim ident s

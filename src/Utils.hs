@@ -12,7 +12,6 @@ import Control.Concurrent.MVar
 import Control.Monad (liftM, msum)
 import qualified Control.Monad.State as ST
 import Data.Char (isSpace)
-import Data.Curve.Util (foldT)
 import Data.Data hiding (typeOf)
 import Data.Foldable (concat)
 import Data.Function (on)
@@ -87,7 +86,7 @@ third3  f (a, b, c) = (a, b, f c)
 uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
 uncurry3 f (a, b, c) = f a b c
 
-atMay :: Num n => [a] -> n -> Maybe a
+atMay :: (Eq n, Num n) => [a] -> n -> Maybe a
 atMay [] _ = Nothing
 atMay (x:_) 0 = Just x
 atMay (_:xs) n = atMay xs (n-1)
@@ -252,6 +251,9 @@ ivlHull (f1, t1) (f2, t2) = (min f1 f2, max t1 t2)
 
 type Ivl = (Int, Int) 
 
+foldT :: (a -> b -> c) -> (a, b) -> c
+foldT f (x, y) = f x y
+
 ivlWidth :: (Int, Int) -> Int
 ivlWidth = foldT subtract
 
@@ -271,6 +273,9 @@ getSpan = listToMaybe . catMaybes
 
 getSpan' :: (Data a) => a -> Ivl
 getSpan' = colSpan . fromJust . getSpan
+
+annSpan :: (Annotated a) => a SrcSpanInfo -> Ivl
+annSpan = colSpan . srcInfoSpan . ann
 
 spanContains :: SrcSpan -> SrcLoc -> Bool 
 spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c)
@@ -369,9 +374,12 @@ cannonicalType t = ST.evalState (rec t) (['a'..'z'], M.empty)
  where
   rec :: (Data a, Typeable a) => a -> STT a
   rec = gmapM rec
-   `extM` (\n -> doName False n >>= return . snd)
+   `extM` handleName
    `extM` (return :: QNameS -> STT QNameS)
    `extM` doType
+
+  handleName :: NameS -> STT NameS
+  handleName n = doName False n >>= return . snd
 
   doName b (Ident s n)  = doVar b n >>= \n' -> return (n, Ident s n')
   doName b (Symbol s n) = doVar b n >>= \n' -> return (n, Symbol s n')

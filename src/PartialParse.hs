@@ -3,6 +3,7 @@ module PartialParse where
 import State
 import Utils
 
+import Control.Arrow (second)
 import Control.Monad (liftM)
 import Data.List (find, isPrefixOf)
 import Data.Maybe (fromJust)
@@ -25,21 +26,26 @@ partialParse
   :: (Show a, Eq a)
   => (String -> ParseResult a)            -- ^ Parsing function
   -> String                               -- ^ String to run it on
-  -> Maybe (a, String, [ParseResolution]) -- ^ A resolution to force parsing, if found
+  -> (Maybe a, [(Ivl, ParseRes)]) -- ^ A resolution to force parsing, if found
+partialParse f t0 = case f t0 of
+  ParseOk decl -> (Just decl, [])
+  err -> (Nothing, [])
+
+{-
 partialParse f t0 = rec 10 Nothing t0
  where
-  rec 0 _ _ = Nothing
+  rec 0 _ _ = (Nothing, [])
   rec limit prior txt =
     case f txt of
-      ParseOk decl -> Just (decl, txt, [])
+      ParseOk decl -> (Just decl, [])
       err -> if prior == Just err
-             then Nothing
+             then (Nothing, [])
              else handleError err
    where
     handleError err@(ParseFailed l e)
 
 -- Include a record of the error that required resolution.
-      = liftM (third3 ((errorEdits, e):))
+      = liftM (second ((errorEdits, e):))
 
 -- Solve any further errors, passing in the current one to avoid re-attempting
 -- an ineffective fix to the same error.
@@ -53,7 +59,7 @@ partialParse f t0 = rec 10 Nothing t0
       errorEdits
         | "Parse error: EOF"             `isPrefixOf` e = [(eivl, balanced)]
         | "Improperly terminated string" `isPrefixOf` e = [(eivl, "\"")]
-        | "Unterminated nested comment"  `isPrefixOf` e = [(eivl, "-}")]
+        | "Unterminated nested comment"  `isPrefixOf` e = [(eivl, '-' : "}")]
         | "Parse error:"                 `isPrefixOf` e = [(tivl, "")]
         | "Parse error in expression: "  `isPrefixOf` e = [(tivl, "")]
         | otherwise = trace e []
@@ -79,6 +85,7 @@ partialParse f t0 = rec 10 Nothing t0
 --       pass.  This will probably be done by calling balanceParens, on lists
 --       created by splitting on all of the Haskell tokens that cause a boundary
       balanced = balanceParens lexed
+-}
 
 -- Lexes a string into a list of tokens.
 lexify = runParser lexRec 

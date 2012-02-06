@@ -1,5 +1,5 @@
-Name:                sinuhask
-Version:             0.0.1
+Name:                panopti
+Version:             0.0.2
 Cabal-Version:       >= 1.2
 Synopsis:            
 Category:            
@@ -11,39 +11,42 @@ Maintainer:          Michael Sloan <mgsloan@gmail.com>
 Stability:           experimental
 Build-Type:          Simple
 
-executable sinu
+executable panopti
   Main-Is:           Main.hs
   Hs-Source-Dirs:    src
   Ghc-Options:        -Wall -O2
-  Other-Modules:     ErrorParser, Utils, Simple
-  Other-Modules:     ErrorParser
-                     Utils
-                     Simple
-                     TypeDiagrams
+  Other-Modules:     
+                     ActiveHs.Simple
+                     Annotations
+                     Brace
+                     ErrorParser
                      ExprDiagrams
+                     PartialParse
+                     TypeDiagrams
                      TypeInfo
+                     Utils
 
                      -- Hint modules
-                     Language.Haskell.Interpreter
-                     Language.Haskell.Interpreter.Extension
-                     Language.Haskell.Interpreter.Unsafe
-                     Language.Haskell.Interpreter.GHC
-                     Language.Haskell.Interpreter.GHC.Unsafe
-                     Hint.GHC
                      Hint.Base
-                     Hint.InterpreterT
                      Hint.Compat
                      Hint.Configuration
-                     Hint.Extension
                      Hint.Context
                      Hint.Conversions
                      Hint.Eval
+                     Hint.Extension
+                     Hint.GHC
+                     Hint.InterpreterT
                      Hint.Parsers
                      Hint.Reflection
-                     Hint.Typecheck
                      Hint.Sandbox
                      Hint.SignalHandlers
+                     Hint.Typecheck
                      Hint.Util
+                     Language.Haskell.Interpreter
+                     Language.Haskell.Interpreter.Extension
+                     Language.Haskell.Interpreter.GHC
+                     Language.Haskell.Interpreter.GHC.Unsafe
+                     Language.Haskell.Interpreter.Unsafe
 
   Extensions:        DoAndIfThenElse
                      ScopedTypeVariables
@@ -52,35 +55,34 @@ executable sinu
 
                      -- Hint extensions
                      CPP
-                     GeneralizedNewtypeDeriving
-                     MultiParamTypeClasses
                      DeriveDataTypeable
-                     MagicHash
-                     TypeSynonymInstances
-                     FlexibleInstances
+                     ExistentialQuantification
                      FlexibleContexts
+                     FlexibleInstances
                      FunctionalDependencies
+                     GeneralizedNewtypeDeriving
                      KindSignatures
+                     MagicHash
+                     MultiParamTypeClasses
+                     PatternGuards
                      Rank2Types
                      ScopedTypeVariables
-                     ExistentialQuantification
-                     PatternGuards
+                     TypeSynonymInstances
                      
-  Build-Depends:     array,
+  Build-Depends:     
+                     array,
                      attoparsec,
                      attoparsec-enumerator,
                      base,
                      Cabal,
                      cairo,
-                     containers,
                      colour,
-                     curve,
+                     containers,
                      data-default,
-                     directory,
                      diagrams-cairo,
                      diagrams-core,
                      diagrams-lib,
-                     enumerator,
+                     directory,
                      extensible-exceptions,
                      fclabels,
                      filepath,
@@ -89,17 +91,17 @@ executable sinu
                      ghc-mtl,
                      ghc-paths,
                      glib,
+                     gtk-toy,
+                     gtk-toy-diagrams,
                      haskell-src,
                      haskell-src-exts,
                      hint,
-                     random,
-                     rex,
                      MonadCatchIO-mtl >= 0.2,
                      mtl,
                      old-time,
-                     rounding,
+                     random,
+                     rex,
                      syb,
                      template-haskell,
-                     toyframework,
                      utf8-string,
                      value-supply

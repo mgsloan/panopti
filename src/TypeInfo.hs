@@ -2,12 +2,15 @@
 
 module TypeInfo where
 
+import ActiveHs.Simple
 import ErrorParser
 import PartialParse
-import Simple
 import State
 import Utils
 
+import Prelude hiding (concat)
+
+import Control.Applicative((<$>))
 import Control.Arrow ((***), (&&&), first, second)
 import Control.Monad (liftM, join)
 import qualified Control.Monad.State as ST
@@ -18,10 +21,9 @@ import Data.Label
 import Data.List (partition, isPrefixOf)
 import qualified Data.Map as M
 import Data.Maybe
-import Graphics.ToyFramework
+import Debug.Trace
 import Language.Haskell.Exts.Annotated
 import qualified Language.Haskell.Interpreter as I
-import Prelude hiding (concat)
 import System.FilePath
 
 {- We need to be able to achieve the following tasks with the static
@@ -63,51 +65,7 @@ makes it even more likely for smoothly animated transitions to happen.
 type, and only then recalculate subsets.
 -}
 
-update s 
-  = liftM (\r -> modify results (`ST.mplus` join r) s)
-          (maybeM (partialParse parseExp $ get code s) processParsed)
- where
-  processParsed (expr, txt', errs) = do
-    subs <- getSubsets (whereify expr) (get chan s)
-  -- TODO: make this a heuristic choice / only compute the preferred subset
-    let pickedSubset = head subs
-
-  -- Unify subsets, ensuring that disjoint subsets have different type names
-    unified <- scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns)
-                     (undefined, [], [], manyNames) pickedSubset
-
-  -- Associate regions of the source code with types.
-    return . Just $ Results (get code s) txt' expr errs
-           $ map (\(_,a,b,_) -> (a, M.fromList $ map (first getSpan') b)) unified
-
--- A sequence of chunks make up a code diagram.  Each code chunk enumerates
--- every expression tree + type known at that juncture
-data Chunk = CodeChunk [(ExpS, TypeS, Maybe ChunkLabel)]
-           | OmitChunk String
-
-type ChunkLabel = (Int, Int)
-
-data TypeDiagramSpec = TypeDiagramSpec
-  { _chunks :: M.Map ChunkLabel Chunk
-  , _chunkSequence :: [ChunkLabel]
-  , _resolutions :: [TypeResolution]
-  }
-
-processParsed :: (ExpS, String, [ParseResolution]) -> TaskChan -> IO TypeDiagramSpec
-processParsed (expr, txt', res) = do
-    subs <- getSubsets (whereify expr) (get chan s)
-  -- TODO: make this a heuristic choice / only compute the preferred subset
-    let pickedSubset = head subs
-
-  -- Unify subsets, ensuring that disjoint subsets have different type names
-    unified <- scanM (\(_,_,_,ns) -> unifyTypes (get chan s) ns)
-                     (undefined, [], [], manyNames) pickedSubset
-
-  -- Associate regions of the source code with types.
-    return . Just $ Results (get code s) txt' expr errs
-           $ map (\(_,a,b,_) -> (a, M.fromList $ map (first getSpan') b)) unified
-
--- Map of declarations to names
+-- Map of names to declarations
 type DeclMap = M.Map String DeclS
 
 -- A list of declarations, with their accompanying type
@@ -123,10 +81,10 @@ type WST = ST.State ([String], [DeclS])
 -- names to all of the parts of the expression allows us to build a tuple, as
 -- the head expression, which references all of them, allowing us to get types
 -- for each component in just one query to GHC.
-whereify :: ExpS -> (ExpS, DeclMap)
-whereify top = second (declMap . snd) $ ST.runState (rec top) (manyNames, [])
+whereify :: ExpS -> (String, DeclMap)
+whereify top = prettyPrint *** (declMap . snd) $ ST.runState (rec top) (manyNames, [])
  where
-  gs = (`SrcSpanInfo`[]) . fromJust . getSpan
+  gs = (`SrcSpanInfo` []) . fromJust . getSpan
   rec :: ExpS -> WST ExpS
   -- Lambdas create a declaration with an appended where clause
   rec l@(Lambda _ ps e) = do
@@ -134,15 +92,15 @@ whereify top = second (declMap . snd) $ ST.runState (rec top) (manyNames, [])
     v <- rec e
     (_, bs) <- ST.get
     addDecl (gs l) v ps bs acc
-  -- Applying a function to  
+  -- Applying a function to multiple parameters becomes a single  
   rec e@(App _ _ _) = addDecl' (gs e) 
                       =<< (liftM buildEApp . mapM rec $ splitEApp e)
-  -- Variables get their  own declaration
+  -- Variables get their own declaration
   rec v@(Var _ _) = addDecl' (gs v) v
   rec v@(Paren _ e) = rec e
   rec e = addDecl' (gs e) =<< grec e
 
-  -- Generic recursion over 
+  -- Generic recursion.
   grec :: forall a . Data a => a -> WST a
   grec = gmapM (grec `extM` rec)
 
@@ -220,14 +178,14 @@ getSubsets p chan = recurse p
   -- getTopSubset - which tree was removed.
 
   recurse' :: DeclMap -> IO [TypedDecls]
-  recurse' dm
-    = liftM (concat . concat)
-    . mapM (recurse . (,dm) . mkPlain . fst)
-    . filter ((== 0) . length . (`declChildren` dm) . snd)
-    $ M.toList dm
+  recurse' dm = liftM (concat . concat) $ sequence
+              [ recurse (n, dm)
+              | (n, d) <- M.toList dm
+              , length (declChildren d dm) == 0
+              ]
 
 -- Type slicing by driving the interpreter (Seminal approach)
-getTopSubset :: (ExpS, DeclMap) -> TaskChan -> IO [TypedDecls]
+getTopSubset :: (String, DeclMap) -> TaskChan -> IO [TypedDecls]
 getTopSubset (top, dm) chan = do 
    types <- getTypes $ M.elems dm
    case types of
@@ -255,7 +213,7 @@ getTopSubset (top, dm) chan = do
         return (if null results then [xs] else results)
       Left err -> watch' "Cause" err $ return []
 
-  -- Attempts to get the types of a set of declarations
+  -- Attempts to get the types of a set of potentially inter-related declarations
   getTypes :: [DeclS] -> IO (Either String TypedDecls)
   getTypes decls = do
     let ppr = prettyPrint $ twhered decls
@@ -264,7 +222,7 @@ getTopSubset (top, dm) chan = do
       Left err -> Left (show err)
       Right typeStr -> Right $
         case watchWith (concatMap (concatMap prettyPrint) . maybeToList) "tupT"
-           $ processType $ parseType typeStr of
+           . processType . debug' "tupS" $ parseIt typeStr of
           Just xs -> zip decls xs
           _ -> []
 
@@ -312,6 +270,11 @@ instance Show TypeResolution where
   show (DataRes t)   = "data " ++ prettyPrint (deQual t)
   show (InstRes t)   = "$(mkDummyInstance \"" ++ prettyPrint (deQual t) ++ "\")"
 
+subsetTypes :: TaskChan -> [TypedDecls] -> IO [([TypeResolution], TypedDecls)]
+subsetTypes chan ds = map (\(_,a,b,_) -> (a, b))
+                 <$> scanM (\(_,_,_,ns) -> unifyTypes chan ns)
+                           (undefined, [], [], manyNames) ds
+
 unifyTypes :: TaskChan -> [String] -> TypedDecls
            -> IO (Either I.InterpreterError String, [TypeResolution], TypedDecls, [String])
 unifyTypes chan names tdecls  = do
@@ -349,7 +312,7 @@ unifyTypes chan names tdecls  = do
   rewritten = comps ++ map mkSig (rewrite tm vars)
    where
     mkSig (d, t) = (set funExpr (ExpTypeSig sp (mkPlain "undefined") 
-                 . mustOk . parse $ prettyPrint t) d, t)
+                 . mustOk . parseIt $ prettyPrint t) d, t)
 
   -- Get the code for a function definition, from the rewritten declarations.
   rec (rs, ds)  = do
@@ -393,11 +356,14 @@ unifyTypes chan names tdecls  = do
     unionEqual = transitivePartition 
       (\(a, b) (a', b') -> b == b' || a == b' || b == a')
 
-    resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
+-- TODO: CPP preprocessor filtering for older versions of GHC
+--    resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
+    resolve (I.GhcError c) = case parseGHCError c of
+
       TypeError (EqualityError a b _ _) _ ->
-        let a' = mustOk $ parseType a
-            b' = mustOk $ parseType b in [TypeRes a' b']
-      TypeError (InstanceError a _) _ -> [InstRes (mustOk $ parseType a)]
+        let a' = mustOk $ parseIt a
+            b' = mustOk $ parseIt b in [TypeRes a' b']
+      TypeError (InstanceError a _) _ -> [InstRes (mustOk $ parseIt a)]
       _ -> []
 
   deQualL (TyCon s (Qual s' (ModuleName _ "L") x)) = Right (TyCon s $ UnQual s' x)
@@ -411,22 +377,23 @@ watchTypeds :: String -> [TypedDecls] -> [TypedDecls]
 watchTypeds n = zipWith (\i -> watchTyped (n ++ show i)) [0..]
 
 watchTyped :: String -> TypedDecls -> TypedDecls
-watchTyped n xs = watch' n 
-  (unlines $ map (\(a, b) -> padLeft padding a ++ " :: " ++ b) ys)
-  xs
+watchTyped n xs
+  = watch' n (unlines $ map (\(a, b) -> padLeft padding a ++ " :: " ++ b) ys) xs
  where
   ys = map (\(a, b) -> (prettyPrint a, prettyPrint b)) xs
   padding = maximum $ map (length . fst) ys
 
 getType :: TaskChan -> String -> IO (IError String)
-getType c t = interpret c "MyMain" $ Simple.typeOf t
+getType c t = interpret c "MyMain" $ typeOf t
 
 -- TODO: configureable static imports
 interpretWith :: TaskChan -> String
               -> I.Interpreter a -> IO (IError a)
 interpretWith c s f = do
-  writeFile (sourceDir </> "L" <.> "hs")
+  writeFile ("source" </> "L" <.> "hs")
     $ "{-# LANGUAGE TemplateHaskell, FlexibleContexts #-}\n"
    ++ "module L where\nimport MyMain\n" ++ s ++ "\n"
-
   interpret c "L" f
+
+watch' _ s x = trace s x
+watchWith f s x = trace (s ++ " " ++ f x) x

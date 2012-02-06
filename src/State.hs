@@ -2,75 +2,59 @@
 
 module State where
 
+import ActiveHs.Simple
 import Utils
 
-import Data.Curve.Util (mapT)
-import Data.IORef
+import Control.Arrow (second)
+import Data.Dynamic
 import Data.Label
-import Data.Map (Map)
-import Graphics.ToyFramework
-import Simple
-import System.Glib.MainLoop (HandlerId, timeoutRemove, timeoutAdd)
+import Graphics.UI.Gtk.Toy.Prelude (CairoDiagram, CursorMark, MarkedText(..))
 
--- (function span, full expression's span, [argument spans])
-type Apps = [(Ivl, Ivl, [Ivl])]
-type TypeMap = Map Ivl TypeS
-type ParseResolution = (Ivl, String)
-
--- A sequence of chunks make up a code diagram.  Each code chunk enumerates
--- every expression tree + type known at that juncture
-data Chunk = CodeChunk [(ExpS, TypeS, Maybe ChunkLabel)]
-           | OmitChunk String
-
-type ChunkLabel = (Int, Int)
-
-data TypeDiagramSpec = TypeDiagramSpec
-  { _chunks :: M.Map ChunkLabel Chunk
-  , _chunkSequence :: [ChunkLabel]
-  , _resolutions :: [TypeResolution]
+data State = State
+  { _chan :: TaskChan
+  , _code :: MarkedText (Versioned Ann)
+  , _result :: CairoDiagram
   }
 
+data Versioned a 
+  = Version
+  { _versionValue :: a
+  , _versionNumber :: VersionNumber
+  }
+ deriving (Eq, Show)
+
+type VersionNumber = Int
+
+data Ann
+  = CursorA
+  | AstA Dynamic
+  | AppA DeclS
+  | TypeA SubsetId TypeS
+  | ErrorA Cause
+  | SubsetA SubsetId [TypeResolution]
+  | ParseResA ParseRes
+
+type Cause = String
+
+type SubsetId = (Int, Int)
+
+data ParseRes = ParseRes Cause String
+ deriving (Eq, Show)
+ 
 data TypeResolution
   = DataRes { resType :: TypeS }
   | TypeRes { resType, targType :: TypeS }
   | InstRes { resType :: TypeS }
   deriving (Eq, Ord)
 
-data Results = Results
-  { _source :: String 
-  , _parseable_source :: String
-  , _parseable_expr :: ExpS
-  , _errors :: [Error]
-  , _subsets :: [([Resolution], Map Ivl TypeS)] }
+$(mkLabels [''State, ''Versioned])
 
-data UserMode = Normal | Selection Bool
+debugMarks pre = debugWith (\(MarkedText t ms) -> pre ++ (show $ map (second $ annType . get versionValue) ms))
 
-data State = State
-  { _code :: String
-  , _cursor :: (Int, Int)
-  , _user :: UserMode
-  , _results :: Maybe Results
-  , _chan :: TaskChan
-  , _mousePos :: (Double, Double)
-  , _timeout :: HandlerId
-  , _selfRef :: IORef (KeyTable, State)
-  , _clips :: [(String, Maybe String)]
-  , _autoEdits :: [([Edit], Results, String)]
-  }
-
-$(mkLabels [''Results, ''State])
-
-sourceDir :: String
-sourceDir = "source"
-
-getSelection :: State -> String
-getSelection s = substr (get cursor s) (get code s)
-
-editCode :: [Edit] -> State -> State
-editCode es s = modify code (applyEdits $ debug es)
-              $ set cursor curs' s
- where
-  curs = get cursor s
-  curs' = mapT (offset+) curs
-  offset = sum . map (\(ivl, xs) -> length xs - ivlWidth ivl)
-         $ takeWhile ((<= curs) . fst) $ debug es
+annType CursorA = "CursorA"
+annType (AstA d) = "AstA-" ++ (tyConName . typeRepTyCon $ dynTypeRep d)
+annType (AppA _) = "AppA"
+annType (TypeA _ _) = "TypeA"
+annType (ErrorA _) = "ErrorA"
+annType (SubsetA _ _) = "SubsetA"
+annType (ParseResA _) = "ParseResA"

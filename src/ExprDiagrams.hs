@@ -2,39 +2,112 @@
 
 module ExprDiagrams where
 
+import Annotations
 import State
 import TypeDiagrams
+import Utils
 
+import Control.Applicative ((<$>))
 import Control.Arrow ((***), (&&&), first, second)
-import Data.Curve.Util (mapT, zipT)
+import Control.Monad (msum)
 import Data.Data hiding (typeOf)
 import Data.Default (def)
+import Data.Dynamic (fromDynamic)
 import Data.Generics.Aliases
 import Data.IORef
 import Data.Label
-import Data.List (intersperse, sort)
-import Data.Maybe (listToMaybe)
+import Data.List (intersperse, sort, findIndices)
+import Data.Maybe (listToMaybe, isJust)
 import Data.Supply
-import Diagrams.Prelude hiding ((===), (|||))
 import Diagrams.Backend.Cairo.CmdLine
+import Diagrams.Backend.Cairo.Text (StyleParam, textLineBounded)
+import Diagrams.Prelude hiding ((===), (|||), fromDynamic)
 import Diagrams.TwoD.Text(Text(..))
-import Utils
+import Graphics.UI.Gtk.Toy.Prelude hiding (debug, debug', fromDynamic)
 import Language.Haskell.Exts.Annotated
 import qualified Data.Map as M
 
 import System.IO.Unsafe
 
+monostyle :: StyleParam
+monostyle = font "monospace" . fontSize 18
+
+coloredShapes :: [String] -> M.Map String CairoDiagram
+coloredShapes names
+  = M.fromList 
+  . zip names
+  $ zipWith (\i c -> fc c $ polygon $ def {polyType = PolyRegular i 1.0}) [4..]
+    [aqua, crimson, brown, fuchsia, khaki, indigo, papayawhip, thistle]
+
+drawCode :: MarkedText (Versioned Ann) -> CairoDiagram
+drawCode mt
+  = vcat
+  . map (draw . substrText True sorted . second (+1))
+  . ivlsFromSlices (textLength mt)
+  . findIndices (=='\n')
+  $ get mText mt
+ where
+  sorted = modify mMarks sortMarks mt
+
+  draw (MarkedText txt [])
+    = textLineBounded monostyle $ filter (not . (`elem` "\r\n")) txt
+
+  draw (MarkedText txt (((f, t), m):xs))
+    =   draw (substrText False mt (-1, f))
+    ||| handleMark (get versionValue m) (substrText True mt (f, t))
+    ||| draw (substrText False mt (t, length txt + 1))
+   where
+    mt = MarkedText txt xs
+
+    handleMark CursorA = drawMark CursorMark txt . draw
+    handleMark (TypeA _ ty) = (=== drawType ty) . draw
+    handleMark (AstA d)
+      = \t -> let t' = debugMarks (show $ length txt) $ removeAstMarks t
+               in maybe (draw mt) id  $ msum
+                [ drawExpr t' <$> fromDynamic d ]
+    handleMark _ = draw
+  
+    -- TODO: find position of ->
+    drawExpr t l@(Lambda _ pats expr)
+      =   drawText "λ"
+      ||| draw (debugMarks "bnds " $ substrText True t bndsIvl)
+      ||| alignB (lined (arrow (20, 0) (5, 5)))
+      ||| strutX 10
+      ||| draw (debugMarks "cnt " $ substrText True t exprIvl)
+     where
+      offset = f - fst (annSpan l)
+      bndsIvl = mapT (+offset) . foldl1 ivlUnion $ map annSpan pats
+      exprIvl = mapT (+offset) $ annSpan expr
+    drawExpr t _ = draw t
+  
+    removeAstMarks (MarkedText txt ms)
+      = MarkedText txt $ filter (not . isTopExpr . second (get versionValue)) ms
+     where
+      isTopExpr (i, AstA d) 
+        = True -- i == (0, length txt - 1) -- && isJust (fromDynamic d :: Maybe ExpS)
+      isTopExpr _ = False
+
+  drawText = draw . (`MarkedText` [])
+
+  drawType = scale 5 . typeDiagram "" shapes (const $ const $ const Nothing)
+
+  allTypes = [x | (_, Version (TypeA _ x) _) <- get mMarks mt]
+
+  shapes = coloredShapes . map prettyPrint $ uniquePrims allTypes
+
+{-
 ivlsGaps :: (Int, Int) -> [(Int, Int)] -> [(Int, Int)]
 ivlsGaps (l, u) xs = map (    snd    ***    fst)
                    $ zip ((0, l) : xs) ((u, 0) : tail xs)
 
-type DrawResult = (CDiagram, [(Int, Int)])
+type DrawResult = (CairoDiagram, [(Int, Int)])
 
--- stateDiagram :: State -> IO CDiagram 
-stateDiagram :: State -> IO CDiagram
+-- stateDiagram :: State -> IO CairoDiagram 
+stateDiagram :: State -> IO CairoDiagram
 stateDiagram = return . alignT . expandRectBounds (1, 1) 
              . drawResults . get results
 
+drawResults :: Maybe Results -> CairoDiagram
 drawResults Nothing
   = mempty
 drawResults (Just (Results txt txt' expr errs subs))
@@ -53,24 +126,24 @@ drawResults (Just (Results txt txt' expr errs subs))
   drawFirst = maybe mempty (drawType . snd) . listToMaybe
 
   -- Draw full type for a given interval 
-  drawFType :: (Data a) => a -> CDiagram
+  drawFType :: (Data a) => a -> CairoDiagram
   drawFType = drawFirst . getContainers . getSpan'
 
   -- Naive way of drawing result types
-  drawRType :: (Data a) => a -> CDiagram
+  drawRType :: (Data a) => a -> CairoDiagram
   drawRType e = drawFirst . filter ((fst ivl ==) . fst . fst) . reverse
               $ getContainers ivl
    where ivl = getSpan' e
 
   codeText = stext 4
 
-  drawCode :: Pretty a => a -> CDiagram
+  drawCode :: Pretty a => a -> CairoDiagram
   drawCode e = codeText $ prettyPrint e
 
   enclose pre post d = hsep [pre, d, post]
   encloseP = enclose (codeText "(") (codeText ")")
 
-  drawExpr :: ExpS -> CDiagram
+  drawExpr :: ExpS -> CairoDiagram
   drawExpr v@(Var _ _)   = drawCode v === drawFType v
   drawExpr v@(IPVar _ _) = drawCode v === drawFType v
   drawExpr v@(Con _ _)   = drawCode v === drawFType v
@@ -94,7 +167,7 @@ drawResults (Just (Results txt txt' expr errs subs))
     hsep $ [codeText "λ"] ++ map drawCode bnds ++ [larrow, drawCode e]
   drawExpr e = hsep $ gmapQ gdraw e
 
-  gdraw :: (Data a) => a -> CDiagram
+  gdraw :: (Data a) => a -> CairoDiagram
   gdraw = const mempty `extQ` (drawExpr . convertOp) `extQ` drawExpr
  
   convertOp :: QOp SrcSpanInfo -> ExpS
@@ -102,9 +175,10 @@ drawResults (Just (Results txt txt' expr errs subs))
   convertOp (QConOp s' qn) = Con s' qn
 
   larrow = lined $ arrow (3, 0) (1, 1)
+-}
 
 {-
-  drawType :: ExpS -> CDiagram
+  drawType :: ExpS -> CairoDiagram
   drawType e = drawExpr e
                 ===
                drawFType (getSpan' e)
@@ -128,7 +202,7 @@ drawResults (Just (Results txt txt' expr errs subs))
 -}
 
 {-
-  withType :: ExpS -> Type -> CDiagram
+  withType :: ExpS -> Type -> CairoDiagram
   withType = undefined
 
   resultType = 
@@ -152,7 +226,7 @@ drawResults (Just (Results txt txt' expr errs subs))
     grec :: Data d => d -> AnnDiagram Cairo R2 Any
     grec = const () `extQ` drawExpr
 
---    doApp :: SrcSpanInfo -> ExpS -> [ExpS] -> CDiagram
+--    doApp :: SrcSpanInfo -> ExpS -> [ExpS] -> CairoDiagram
   doApp s es = ( ivls
                , ( eDiagram
                     ===

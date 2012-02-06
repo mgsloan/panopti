@@ -1,72 +1,95 @@
-{-# LANGUAGE DoAndIfThenElse, ScopedTypeVariables, TemplateHaskell,
-TupleSections, ParallelListComp #-}
+{-# LANGUAGE TemplateHaskell
+           , StandaloneDeriving #-}
 
-import Brace
+import Annotations
 import ExprDiagrams
-import ErrorParser
-import Input
-import PartialParse
-import Simple
+import TypeInfo     (whereify, getSubsets, subsetTypes)
+import PartialParse (partialParse)
 import State
-import TypeInfo
-import Utils
+import Utils (parseIt)
+
+import ActiveHs.Simple
+import qualified Language.Haskell.Interpreter as Ghci
 
 import Prelude hiding ((.))
-
 import Control.Category ((.))
-import Data.IORef
-import Data.Label
-import Diagrams.Backend.Cairo
-import Diagrams.TwoD
-import qualified Graphics.Rendering.Cairo as C
-import Graphics.Rendering.Diagrams
-import Graphics.ToyFramework
-import qualified Language.Haskell.Exts.Annotated as A
-import System.Directory (createDirectoryIfMissing)
-import qualified System.Glib.MainLoop as G
 
--- TODO: configureable static imports
+import Control.Arrow (second)
+import Data.Data
+import Data.Label
+import Graphics.UI.Gtk.Toy.Prelude
+
 main :: IO ()
 main = do
-  createDirectoryIfMissing False sourceDir
-  chan <- startGHCiServer [sourceDir] print print
-  (stateRef, loop) <- runToyState $ Toy
-    { initialState =
-        --State "map (+1) . map (*2) $ (filter isSpace $ tail \"hello world\")"
-        State "(\\x -> x + 1) 5"
-              (0, 0) Normal Nothing chan (0, 220) 0 undefined [] []
-    , mouse   = const $ setM mousePos
-    , key     = handleKey' setTimeout
-    , display = handleDisplay
-    , tick    = const return
-    }
-  modifyIORefM stateRef (secondM (setTimeout . set selfRef stateRef))
-  loop
+  ch <- startGHCiServer ["."] print print
+  runToy $ State ch cursorText mempty
 
-handleDisplay :: DrawWindow -> IPnt -> IRect -> State -> C.Render State
-handleDisplay dw _ _ s@(State txt ix user p c mouse _ _ _ _) = do
-  let textPos = (50.5, 200.5)
+instance Interactive State where
+  keyboard k _ s | fst k == True = update $ modify code (textKeyHandler k) s
+                 | otherwise = return s
 
-  C.liftIO $ fst
-           . renderDia Cairo (CairoOptions "" (GTK dw Nothing False))
-           . scale 10
-           =<< stateDiagram s
+instance GtkInteractive State where
+  display = displayDiagram toDiagram
 
-  return s
+instance Diagrammable State Cairo R2 where
+  toDiagram (State _ c r)
+    = scaleY (-1) . (strutX 50 |||) . (strutY 58 |||)
+    $ (alignT $ plainText "> " ||| drawCode c)
+        ===
+      alignL r
 
-updateTime :: Int
-updateTime = 200
+plainText :: String -> CairoDiagram
+plainText = monoText . (`MarkedText` ([] :: [(Ivl, CursorMark)]))
 
+-- Needed in order to be able to provide a witness for CairoDiagram.
+deriving instance Typeable Any
+
+{-
+update s = do
+  val <- interpret (get chan s) "MyPrelude"
+       $ Ghci.interpret (get (mText . code) s) (mempty :: CairoDiagram)
+  return $ set response (either (plainText . show) id val) s
+-}
+
+-- TODO: set response diagram
+
+update s = do
+  let (e, prs) = partialParse parseIt $ get (mText . code) s
+      prms = map (second $ (`Version` 0) . ParseResA) prs
+      remPrms = filterMarks $ not . isParseResA . get versionValue . snd
+
+  f <- case e of
+    Nothing -> return $ addMarks prms . remPrms
+    Just e' -> do
+      let apps = whereify e'
+          tchan = get chan s
+
+      subs <- getSubsets apps tchan
+
+      types <- mapM (subsetTypes tchan) subs
+    
+      let anns = prms ++ map (second (`Version` 0))
+               ( astAnns e'
+              ++ appAnns (snd apps)
+              ++ subsetsAnns types
+               )
+       
+      return $ addMarks anns . filterMarks (isCursor . snd)
+
+  return $ modify code (debugMarks "cur" . f) s
+
+{-
 setTimeout :: State -> IO State
-setTimeout s = do
-  case get timeout s of
-    0 -> return ()
-    x -> G.timeoutRemove x
-  time <- G.timeoutAdd (handler $ get selfRef s) updateTime
-  setM timeout time s
- where
-  handler ref = do
-    (km, st) <- readIORef ref
-    st' <- update st
-    writeIORef ref (km, st')
-    return False
+-setTimeout s = do
+-  case get timeout s of
+-    0 -> return ()
+-    x -> G.timeoutRemove x
+-  time <- G.timeoutAdd (handler $ get selfRef s) updateTime
+-  setM timeout time s
+- where
+-  handler ref = do
+-    (km, st) <- readIORef ref
+-    st' <- update st
+-    writeIORef ref (km, st')
+-    return False
+-}
