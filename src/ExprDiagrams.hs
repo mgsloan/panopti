@@ -52,10 +52,10 @@ drawCode mt
   draw (MarkedText txt [])
     = textLineBounded monostyle $ filter (not . (`elem` "\r\n")) txt
 
-  draw (MarkedText txt (((f, t), m):xs))
-    =   draw (substrText False mt (-1, f))
-    ||| handleMark (get versionValue m) (substrText True mt (f, t))
-    ||| draw (substrText False mt (t, length txt + 1))
+  draw (MarkedText txt (((fm, tm), m):xs))
+    =   draw (substrText False mt (-1, fm))
+    ||| handleMark (get versionValue m) (substrText True mt (fm, tm))
+    ||| draw (substrText False mt (tm, length txt + 1))
    where
     mt = MarkedText txt xs
 
@@ -63,7 +63,7 @@ drawCode mt
     handleMark (TypeA _ ty) = (=== drawType ty) . draw
     handleMark (AstA d)
       = \t -> let t' = debugMarks (show $ length txt) $ removeAstMarks t
-               in maybe (draw mt) id  $ msum
+               in maybe (draw t') id  $ msum
                 [ drawExpr t' <$> fromDynamic d ]
     handleMark _ = draw
   
@@ -75,16 +75,16 @@ drawCode mt
       ||| strutX 10
       ||| draw (debugMarks "cnt " $ substrText True t exprIvl)
      where
-      offset = f - fst (annSpan l)
-      bndsIvl = mapT (+offset) . foldl1 ivlUnion $ map annSpan pats
-      exprIvl = mapT (+offset) $ annSpan expr
+      offset = debug $ fm - fst (annSpan l)
+      bndsIvl = first (subtract 1) . mapT (+offset) . foldl1 ivlUnion $ map annSpan pats
+      exprIvl = first (subtract 1) . mapT (+offset) $ annSpan expr
     drawExpr t _ = draw t
   
     removeAstMarks (MarkedText txt ms)
       = MarkedText txt $ filter (not . isTopExpr . second (get versionValue)) ms
      where
       isTopExpr (i, AstA d) 
-        = True -- i == (0, length txt - 1) -- && isJust (fromDynamic d :: Maybe ExpS)
+        = i == (0, length txt - 1) -- && isJust (fromDynamic d :: Maybe ExpS)
       isTopExpr _ = False
 
   drawText = draw . (`MarkedText` [])
