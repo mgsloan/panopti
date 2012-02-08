@@ -16,7 +16,7 @@ import Data.Monoid (Monoid)
 import Data.Supply
 import Diagrams.Prelude hiding ((===), (|||), trim)
 import Diagrams.Backend.Cairo.CmdLine
-import Diagrams.TwoD.Text(Text(..))
+import Diagrams.Backend.Cairo.Text (StyleParam, textLineBounded)
 import Graphics.UI.Gtk.Toy.Diagrams
 import Prelude hiding (concat)
 import Utils
@@ -53,8 +53,7 @@ main = do
       squig _ xs = Just $ (lined (squiggle 1) # alignT ||| vsep xs # alignT)
       usr = matchContext (parseT "Arrow a => a") (gtDraw squig)
 --      usr r a t = r a t
-  let dia = fontSize 0.5 -- . showLabels -- . fontSize 10
-          $ typeDiagram (0 :: Int) (coloredShapes $ map (:[]) ['a'..]) usr (snd $ tys !! 0)
+  let dia = typeDiagram (0 :: Int) (coloredShapes $ map (:[]) ['a'..]) usr (snd $ tys !! 0)
       bg = fc white $ rect (20 + width dia) (20 + height dia)
   defaultMain ((centerXY dia) `atop` (centerXY bg))
  where
@@ -96,8 +95,8 @@ scaleXY (x, y) = scaleX x . scaleY y
 hsep, vsep
   :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
   => [a] -> a
-hsep = hcat' (def {sep = 0.5})
-vsep = vcat' (def {sep = 1})
+hsep = hcat' (def {sep = 1})
+vsep = vcat' (def {sep = 2})
 
 hsep', vsep' 
   :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
@@ -123,17 +122,8 @@ setRectBounds r2 = setBounds bnds
 expandRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
 expandRectBounds (x, y) d = setRectBounds (width d + x, height d + y) d
 
-stext :: (Renderable (Path R2) b, Renderable Text b) 
-      => Double -> String -> Diagram b R2
-stext sz txt = text txt
-             # fontSize sz
-             # setRectBounds ((sz * 0.5 * fromIntegral (length txt), sz))
-             
-text' :: (Renderable (Path R2) b, Renderable Text b) 
-      => String -> Diagram b R2
-text' xs = text xs 
-         # setRectBounds (1 * (fromIntegral $ length xs), 2)
-         # fillColor forestgreen
+text' :: String -> CairoDiagram
+text' = scale 0.1 . textLineBounded (fontSize 14)
 
 arrow :: ( Floating (Scalar t)
          , Num t
@@ -196,7 +186,7 @@ typeDiagram :: IsName t
   -> UserDiagram
   -> TypeS
   -> CairoDiagram
-typeDiagram pre dm usr = rec []
+typeDiagram pre dm usr = (=== strutY 2) . rec [] 
  where
   prim ident s
     = case M.lookup ident dm of

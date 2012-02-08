@@ -32,9 +32,13 @@ import System.IO.Unsafe
 monostyle :: StyleParam
 monostyle = font "monospace" . fontSize 18
 
+monotext :: String -> CairoDiagram
+monotext = textLineBounded monostyle 
+
 coloredShapes :: [String] -> M.Map String CairoDiagram
 coloredShapes names
   = M.fromList 
+  . (++ [("Int", scale 0.2 $ monotext "Z")])
   . zip names
   $ zipWith (\i c -> fc c $ polygon $ def {polyType = PolyRegular i 1.0}) [4..]
     [aqua, crimson, brown, fuchsia, khaki, indigo, papayawhip, thistle]
@@ -50,7 +54,7 @@ drawCode mt
   sorted = modify mMarks sortMarks mt
 
   draw (MarkedText txt [])
-    = textLineBounded monostyle $ filter (not . (`elem` "\r\n")) txt
+    = monotext $ filter (not . (`elem` "\r\n")) txt
 
   draw (MarkedText txt (((fm, tm), m):xs))
     =   draw (substrText False mt (-1, fm))
@@ -78,6 +82,7 @@ drawCode mt
       offset = debug $ fm - fst (annSpan l)
       bndsIvl = first (subtract 1) . mapT (+offset) . foldl1 ivlUnion $ map annSpan pats
       exprIvl = first (subtract 1) . mapT (+offset) $ annSpan expr
+--    drawExpr t e@()
     drawExpr t _ = draw t
   
     removeAstMarks (MarkedText txt ms)

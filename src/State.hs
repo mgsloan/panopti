@@ -7,13 +7,17 @@ import Utils
 
 import Control.Arrow (second)
 import Data.Dynamic
+import Data.IORef
 import Data.Label
+
+import qualified Graphics.UI.Gtk.General.General as G
 import Graphics.UI.Gtk.Toy.Prelude (CairoDiagram, CursorMark, MarkedText(..))
 
 data State = State
   { _chan :: TaskChan
   , _code :: MarkedText (Versioned Ann)
   , _result :: CairoDiagram
+  , _timer :: G.HandlerId
   }
 
 data Versioned a 

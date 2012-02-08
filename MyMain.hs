@@ -1,15 +1,24 @@
-module MyMain (module Prelude, module Data.Char, module Control.Arrow, dummyInstance, mkDummyInstance, mkDummyInstances) where
+module MyMain 
+  ( module Data.Char
+--  , module Control.Arrow
+  , module Diagrams.Prelude
+  , module Diagrams.Backend.Cairo
+  , module Diagrams.TwoD.Path.Turtle
+  , dummyInstance, mkDummyInstance, mkDummyInstances) where
 
-import Control.Arrow
+--import Control.Arrow
 import Control.Monad
 import Language.Haskell.TH
 import Language.Haskell.Meta.Parse
-import Debug.Trace
 import Data.Char
+import Debug.Trace
+import Diagrams.Prelude
+import Diagrams.Backend.Cairo
+import Diagrams.TwoD.Path.Turtle
 
 import Prelude
 
-default ()
+-- default ()
 
 debug x = trace (show x) x
 

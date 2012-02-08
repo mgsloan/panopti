@@ -91,6 +91,7 @@ executable panopti
                      ghc-mtl,
                      ghc-paths,
                      glib,
+                     gtk,
                      gtk-toy,
                      gtk-toy-diagrams,
                      haskell-src,

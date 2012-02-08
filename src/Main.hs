@@ -6,7 +6,7 @@ import ExprDiagrams
 import TypeInfo     (whereify, getSubsets, subsetTypes)
 import PartialParse (partialParse)
 import State
-import Utils (parseIt)
+import Utils (parseIt, setM, modifyIORefM)
 
 import ActiveHs.Simple
 import qualified Language.Haskell.Interpreter as Ghci
@@ -16,23 +16,33 @@ import Control.Category ((.))
 
 import Control.Arrow (second)
 import Data.Data
+import Data.IORef
 import Data.Label
+import qualified Graphics.UI.Gtk.General.General as G
 import Graphics.UI.Gtk.Toy.Prelude
 
 main :: IO ()
 main = do
   ch <- startGHCiServer ["."] print print
-  runToy $ State ch cursorText mempty
+  let state = State ch cursorText mempty 0
+  runToy =<< newIORef state
 
-instance Interactive State where
-  keyboard k _ s | fst k == True = update $ modify code (textKeyHandler k) s
-                 | otherwise = return s
+modifyIORefM' f sr = do
+  s <- readIORef sr
+  r <- f s
+  writeIORef sr r
+  return sr
 
-instance GtkInteractive State where
-  display = displayDiagram toDiagram
+instance Interactive (IORef State) where
+  keyboard k _ s
+    | fst k == True = setTimeout =<< modifyIORefM' (return . modify code (textKeyHandler k)) s
+    | otherwise = return s
+
+instance GtkInteractive (IORef State) where
+  display dw i = modifyIORefM' $ displayDiagram toDiagram dw i
 
 instance Diagrammable State Cairo R2 where
-  toDiagram (State _ c r)
+  toDiagram (State _ c r _)
     = scaleY (-1) . (strutX 50 |||) . (strutY 58 |||)
     $ (alignT $ plainText "> " ||| drawCode c)
         ===
@@ -44,22 +54,11 @@ plainText = monoText . (`MarkedText` ([] :: [(Ivl, CursorMark)]))
 -- Needed in order to be able to provide a witness for CairoDiagram.
 deriving instance Typeable Any
 
-{-
-update s = do
-  val <- interpret (get chan s) "MyPrelude"
-       $ Ghci.interpret (get (mText . code) s) (mempty :: CairoDiagram)
-  return $ set response (either (plainText . show) id val) s
--}
-
 -- TODO: set response diagram
 
 update s = do
-  let (e, prs) = partialParse parseIt $ get (mText . code) s
-      prms = map (second $ (`Version` 0) . ParseResA) prs
-      remPrms = filterMarks $ not . isParseResA . get versionValue . snd
-
-  f <- case e of
-    Nothing -> return $ addMarks prms . remPrms
+  case e of
+    Nothing -> return $ modify code (addMarks prms . remPrms) s
     Just e' -> do
       let apps = whereify e'
           tchan = get chan s
@@ -73,23 +72,30 @@ update s = do
               ++ appAnns (snd apps)
               ++ subsetsAnns types
                )
-       
-      return $ addMarks anns . filterMarks (isCursor . snd)
 
-  return $ modify code (debugMarks "cur" . f) s
+      val <- interpret (get chan s) "MyMain"
+           $ Ghci.interpret (get (mText . code) s) (mempty :: CairoDiagram)
 
-{-
-setTimeout :: State -> IO State
--setTimeout s = do
--  case get timeout s of
--    0 -> return ()
--    x -> G.timeoutRemove x
--  time <- G.timeoutAdd (handler $ get selfRef s) updateTime
--  setM timeout time s
-- where
--  handler ref = do
--    (km, st) <- readIORef ref
--    st' <- update st
--    writeIORef ref (km, st')
--    return False
--}
+      return . set result (either (plainText . show) id val)
+             $ modify code (addMarks anns . filterMarks (isCursor . snd)) s
+ where
+  (e, prs) = partialParse parseIt $ get (mText . code) s
+  prms = map (second $ (`Version` 0) . ParseResA) prs
+  remPrms = filterMarks $ not . isParseResA . get versionValue . snd
+
+timeoutMs = 200
+
+setTimeout :: IORef State -> IO (IORef State)
+setTimeout sr = do
+  s <- readIORef sr
+  case get timer s of
+    0 -> return ()
+    x -> G.timeoutRemove x
+  time <- G.timeoutAdd (handler sr) timeoutMs
+  modifyIORefM' (setM timer time) sr
+ where
+  handler ref = do
+    st <- readIORef ref
+    st' <- update st
+    writeIORef ref st'
+    return False
