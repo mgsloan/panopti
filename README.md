@@ -2,6 +2,10 @@
 
 *A work-in-progress tool to aid understanding and manipulating Haskell.*
 
+## Dependencies / Installation
+
+Similar to: https://github.com/mgsloan/diagrams-ghci/blob/master/README
+
 ## Current problems
 
 * It is showing all of the potential types for a given start of an AST interval.  Fixing this requires constructing multi-term type explanations.
