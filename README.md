@@ -1,8 +1,8 @@
-Panopti
+# Panopti
 
-A work-in-progress tool to aid understanding and manipulating Haskell.
+*A work-in-progress tool to aid understanding and manipulating Haskell.*
 
-# Current problems
+## Current problems
 
 * It is showing all of the potential types for a given start of an AST interval.  Fixing this requires constructing multi-term type explanations.
 
@@ -19,7 +19,7 @@ A work-in-progress tool to aid understanding and manipulating Haskell.
 * No safety from non-terminating expressions
 
 
-Near-term features / tasks:
+## Near-term features / tasks
 
 * Make literals (optionally) into manipulable widgets
 
@@ -32,7 +32,9 @@ Near-term features / tasks:
 * Make the annotations apply to proper source-spans, rather than column-intervals.  This is wrapped up in the conversion to trifecta for the buffer data structure.
 
 
-Long term features: so many! here are some thoughts
+## Long term features
+
+*so many! here are some thoughts*
 
 * Hare-like refactorings / type driven structural separation and recombination (structure editing)
 
