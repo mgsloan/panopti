@@ -10,7 +10,7 @@ A work-in-progress tool to aid understanding and manipulating Haskell.
 
 * Moving the cursor around splits semantic marks - inserting a mark consists of splitting around the insertion point and rewriting the new location's chunk.  Fixing / improving Graphics.UI.Gtk.Toy.Text would help this, but its utility as a prototype of marked text has served its purpose.  Planning to move to a modified version of trifecta's rope structure (see my github), so fixing the naive implementation has little benefit.
 
-* The cursor isn't shown sometimes, due to too draconian of mark removal while drawing the expression diagram.
+* The cursor isn't shown sometimes, due to too erroneous mark removal while drawing the expression diagram.
 
 * Mark typeclass currently not being used for drawing, as the current default implementation is not powerful enough.
 
@@ -19,7 +19,9 @@ A work-in-progress tool to aid understanding and manipulating Haskell.
 * No safety from non-terminating expressions
 
 
-Near-term features / tasks:
+# Near-term features / tasks
+
+* Specializations for types, that give a default rendering schemes
 
 * Make literals (optionally) into manipulable widgets
 
@@ -32,7 +34,16 @@ Near-term features / tasks:
 * Make the annotations apply to proper source-spans, rather than column-intervals.  This is wrapped up in the conversion to trifecta for the buffer data structure.
 
 
-Long term features: so many! here are some thoughts
+# Long term features
+
+*So many! Here are some thoughts*
+
+
+* Evaluation results with folding of contents
+
+* Placing of value probes that allow for a stream of values to fly past
+  * Histogram / other summaries
+  * Type-specific temporal plots
 
 * Hare-like refactorings / type driven structural separation and recombination (structure editing)
 
@@ -42,11 +53,15 @@ Long term features: so many! here are some thoughts
 * Collaboration UI:
   * When in collaboration mode, a cursor reflects a user lock.  Cursor visually changes when all other clients have acknowledged that lock and the edit is guaranteed.
 
-   * Provide a view of others' uncommitted changes (without these changes actually applying) - provide cherry picking (what about version control?? get the clients to agree on a micro-commit?)
+  * Provide a view of others' uncommitted changes (without these changes actually applying) - provide cherry picking (what about version control?? get the clients to agree on a micro-commit?)
 
 * Autocompletion based on typing context, potentially informed by other heuristics:
-   * Frequently seen code structures (suggest abstraction?)
+  * Frequently seen code structures (suggest abstraction?)
 
-   * Best practices heuristics - can also be used for refactorings proposals and the fixpoint of autocomplete, below.
+  * Best practices heuristics - can also be used for refactorings proposals and the fixpoint of autocomplete, below.
 
 * Fixpoint of autocomplete, based on a user-selected subset of functions to try to use, and a set of input / output examples.
+
+
+* Live code editing by replacing declarations / subtrees with unsafe IORef lookups
+  *  Data declaration extension - hard, but seems possible, but perhaps only by munging code to only use functions of a typeclass generated for the data structure.
