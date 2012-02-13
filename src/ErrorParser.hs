@@ -60,7 +60,10 @@ data Arising = Arising String (Maybe SrcSpan)
 parseGHCError :: String -> GHCError
 parseGHCError inputErr = parseTop inputTrees (concatTree $ head inputTrees)
  where
-  inputTrees = toTrees inputErr
+  inputTrees = case toTrees inputErr of
+    --TODO: ignore ys?
+    ((Tree [rex|\.hs:\d*:\d*:$|] xs):ys) -> xs ++ ys
+    xs -> xs
   doTE trees t = TypeError t (catMaybes $ map parseAux trees)
 
   parseAux tr@(Tree [rex|^In the.*$|] _) = Just . AuxCtxt $ parseCtxt (concatTree tr)
@@ -75,8 +78,8 @@ parseGHCError inputErr = parseTop inputTrees (concatTree $ head inputTrees)
    where
     (0, cs, a) = parseParens rest
 
-  parseTop (_:ea:xs) [rex|^Couldn't match expected type `(?{ eTy }[^']*)' 
-                                       with actual type `(?{ aTy }[^']*)'|]
+  parseTop (_:ea:xs) [rex|^Couldn't match (expected)? type `(?{ eTy }[^']*)' 
+                                       with (actual type)? `(?{ aTy }[^']*)'|]
     = doTE xs $ EqualityError eTy aTy efTy afTy
    where
     efTy = [rex|^Expected type: (?{ }.*)$|] $ treeText ea

@@ -187,12 +187,13 @@ getSubsets p chan = recurse p
 -- Type slicing by driving the interpreter (Seminal approach)
 getTopSubset :: (String, DeclMap) -> TaskChan -> IO [TypedDecls]
 getTopSubset (top, dm) chan = do 
-   types <- getTypes $ M.elems dm
-   case types of
-     Left err -> watch' ("top " ++ err) err
-               . maybe (return []) derefChildren
-               $ M.lookup top dm
-     Right xs -> return [xs]
+  let decls = M.elems dm
+  types <- getTypes decls
+  case types of
+    Left err -> watch' "top " err
+              . maybe (return []) derefChildren
+              $ M.lookup top dm
+    Right xs -> return [xs]
  where
   -- Removes declarations that the passed declaration references, and
   -- recursively removes their children.  In other words, this deletes an
@@ -217,16 +218,16 @@ getTopSubset (top, dm) chan = do
   getTypes :: [DeclS] -> IO (Either String TypedDecls)
   getTypes decls = do
     let ppr = prettyPrint $ twhered decls
-    typ <- getType chan ppr
+    typ <- getType chan (watch' "toi " ppr ppr)
     return $ case typ of
       Left err -> Left (show err)
       Right typeStr -> Right $
-        case watchWith (concatMap (concatMap prettyPrint) . maybeToList) "tupT"
-           . processType . debug' "tupS" $ parseIt typeStr of
+        case --watchWith (concatMap (concatMap prettyPrint) . maybeToList) "tupT" . 
+             processType $ parseIt typeStr of
           Just xs -> zip decls xs
           _ -> []
 
-  -- Apply the context to each subcomponent, enumerate contents of tuple type
+  -- Apply the context to each subcomponent, enumerate contents of tuple type.
   processType :: ParseResult TypeS -> Maybe [TypeS]
   processType (ParseOk (TyTuple _ _ xs)) = Just xs
   processType (ParseOk (TyForall _ bnds ctx t)) 
@@ -278,7 +279,7 @@ subsetTypes chan ds = map (\(_,a,b,_) -> (a, b))
 unifyTypes :: TaskChan -> [String] -> TypedDecls
            -> IO (Either I.InterpreterError String, [TypeResolution], TypedDecls, [String])
 unifyTypes chan names tdecls  = do
-  (typ, rs, ds) <- rec (map DataRes typesUsed, tdecls)
+  (typ, rs, ds) <- rec (map DataRes typesUsed, rewritten)
   return (typ, rs, rewrite tm' ds, namesRemaining)
  where
   (vars, comps) = partition (isVarOrLit . get funExpr . fst) tdecls
@@ -286,11 +287,11 @@ unifyTypes chan names tdecls  = do
   isVarOrLit :: ExpS -> Bool
   isVarOrLit (Var _ _) = True
   isVarOrLit (IPVar _ _) = True
-  isVarOrLit (Lit _ _) = True
+--  isVarOrLit (Lit _ _) = True
   isVarOrLit _ = False
 
   -- All of the free polymorphic variables in the declarations
-  freeVars = onubSortBy id $ concatMap (freeTVars . snd) tdecls
+  freeVars = debug . onubSortBy id $ concatMap (freeTVars . snd) tdecls
 
   -- Get the names we'll need for dummy datatypes.
   (namesUsed, namesRemaining) = splitAt (length freeVars) names
@@ -300,10 +301,10 @@ unifyTypes chan names tdecls  = do
               | n <- namesUsed ]
 
   -- Forward and reverse mappings of the types.
-  tm  = M.fromList [ (t, n) 
-                   | t <- freeVars | n <- typesUsed]
+  tm  = M.fromList [ (t, n)
+                   | t <- freeVars | n <- typesUsed ]
   tm' = M.fromList [ (prettyPrint n, TyVar sp $ Ident sp t)
-                   | t <- freeVars | n <- typesUsed]
+                   | t <- freeVars | n <- typesUsed ]
 
   rewrite m = map (second $ specializeTypes m)
 
@@ -311,7 +312,7 @@ unifyTypes chan names tdecls  = do
   -- with explicit types.
   rewritten = comps ++ map mkSig (rewrite tm vars)
    where
-    mkSig (d, t) = (set funExpr (ExpTypeSig sp (mkPlain "undefined") 
+    mkSig (d, t) = (set funExpr (ExpTypeSig sp (mkPlain "undefined")
                  . mustOk . parseIt $ prettyPrint t) d, t)
 
   -- Get the code for a function definition, from the rewritten declarations.
@@ -319,7 +320,7 @@ unifyTypes chan names tdecls  = do
     let fname = "foo"
         txt = (prettyPrint . mkFun fname . twhered $ map fst ds)
             ++ "\n" ++ (unlines . map show $ onubSortBy id rs)
-    typ <- interpretWith chan txt $ typeOf fname
+    typ <- interpretWith chan (debug txt) $ typeOf fname
     case typ of
       Left (I.WontCompile xs) -> handleErrors typ xs
       _ -> return (typ, rs, ds)
@@ -328,7 +329,7 @@ unifyTypes chan names tdecls  = do
     pickCannonical rs xs = case cons of
        -- Prefer a constructor if there is one.
        [h] -> (h, syns)
-       [] -> fromJust $ extractFirst ((`elem`rs) . DataRes) syns
+       [] -> fromJust $ extractFirst ((`elem` rs) . DataRes) syns
       where 
        (syns, cons) = partition isConL
                     . onubSortBy id
@@ -340,13 +341,14 @@ unifyTypes chan names tdecls  = do
     -- Create a resolution for each kind of error, and rewrite based on type
     -- equality constraint. 
     handleErrors typ xs = do
-      let (ts, rs') = partition isTypeRes $ concatMap resolve xs
+      let (ts, rs') = debug . partition isTypeRes . onubSortBy id $ concatMap resolve (debug xs)
           -- Build a map from each of these to the cannonical type
-          synMap = M.fromList
+          synMap = debug
+                 . M.fromList
           -- Write the map for rewriting types to the cannonical
                  . concatMap (\(x, xs) -> map ((,x) . prettyPrint) xs)
           -- Pick a cannonical type to rewrite the others to
-                 . map (pickCannonical rs)
+                 . map (pickCannonical rs')
           -- Find all related type-synonyms
                  $ unionEqual [ (a, b) | TypeRes a b <- ts ]
       if null rs'
@@ -358,12 +360,17 @@ unifyTypes chan names tdecls  = do
 
 -- TODO: CPP preprocessor filtering for older versions of GHC
 --    resolve (I.GhcError (_, _, c, _)) = case parseGHCError c of
-    resolve (I.GhcError c) = case parseGHCError c of
+    resolve (I.GhcError c) = case debug (parseGHCError c) of
 
       TypeError (EqualityError a b _ _) _ ->
         let a' = mustOk $ parseIt a
             b' = mustOk $ parseIt b in [TypeRes a' b']
-      TypeError (InstanceError a _) _ -> [InstRes (mustOk $ parseIt a)]
+      TypeError (InstanceError a _) _
+        -> case preferOk (parseIt a) of
+              Just (TyTuple _ _ ts) -> map InstRes ts
+              Just a -> [InstRes a]
+              Nothing -> []
+
       _ -> []
 
   deQualL (TyCon s (Qual s' (ModuleName _ "L") x)) = Right (TyCon s $ UnQual s' x)
@@ -390,10 +397,10 @@ getType c t = interpret c "MyMain" $ typeOf t
 interpretWith :: TaskChan -> String
               -> I.Interpreter a -> IO (IError a)
 interpretWith c s f = do
-  writeFile ("source" </> "L" <.> "hs")
+  writeFile ("L" <.> "hs")
     $ "{-# LANGUAGE TemplateHaskell, FlexibleContexts #-}\n"
    ++ "module L where\nimport MyMain\n" ++ s ++ "\n"
   interpret c "L" f
 
-watch' _ s x = trace s x
+watch' n s x = trace (n ++ s) x
 watchWith f s x = trace (s ++ " " ++ f x) x

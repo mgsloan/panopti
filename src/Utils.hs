@@ -91,6 +91,14 @@ atMay [] _ = Nothing
 atMay (x:_) 0 = Just x
 atMay (_:xs) n = atMay xs (n-1)
 
+
+-- Next two from the "safe" package
+liftMay :: (a -> b) -> (a -> Bool) -> (a -> Maybe b)
+liftMay func test val = if test val then Nothing else Just $ func val
+
+lastMay :: [a] -> Maybe a
+lastMay = liftMay last null
+
 pairGroupBy :: (t -> t -> Bool) -> [t] -> [[t]]
 pairGroupBy f [] = []
 pairGroupBy f [x] = [[x]]
@@ -118,7 +126,8 @@ fullPartition eq (a:as) = (a:as1) : fullPartition eq as2
 -- Not super efficient, but ohwell.
 transitivePartition :: (a -> a -> Bool) -> [a] -> [[a]]
 transitivePartition f [] = []
-transitivePartition f (x:xs) = xs1' : transitivePartition f xs2'
+transitivePartition f (x:xs) = (if null xs1' then id else (xs1':))
+                             $ transitivePartition f xs2'
  where
   (xs1', xs2') = helper [x] xs
   helper [] xs = ([], xs)
@@ -454,7 +463,7 @@ buildEApp :: [ExpS] -> ExpS
 buildEApp = helper . reverse
  where
   helper [t] = t
-  helper (b : a) = App sp (buildEApp a) b
+  helper (b : a) = App sp (helper a) b
 
 splitTFunc :: TypeS -> [TypeS]
 splitTFunc (TyFun _ a b) = a : splitTFunc b
@@ -465,8 +474,8 @@ buildTFunc [t] = t
 buildTFunc (a : b) = TyFun sp a (buildTFunc b)
 
 getVar :: NameS -> [String]
-getVar (Ident _ n) = [n]
-getVar (Symbol _ n) = [n]
+getVar (Ident _ n) = []
+getVar (Symbol _ n) = [n] -- [n]
 
 getVars :: Data a => a -> [String]
 getVars = listAll (const [] `extQ` getVar)

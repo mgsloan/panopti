@@ -96,7 +96,7 @@ hsep, vsep
   :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
   => [a] -> a
 hsep = hcat' (def {sep = 1})
-vsep = vcat' (def {sep = 2})
+vsep = vcat' (def {sep = 1})
 
 hsep', vsep' 
   :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
@@ -123,7 +123,7 @@ expandRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
 expandRectBounds (x, y) d = setRectBounds (width d + x, height d + y) d
 
 text' :: String -> CairoDiagram
-text' = scale 0.1 . textLineBounded (fontSize 14)
+text' = centerY . scale 0.1 . textLineBounded (fontSize 14)
 
 arrow :: ( Floating (Scalar t)
          , Num t
@@ -218,21 +218,22 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
     draw t@(TyApp _ _ _) = case usr rec ctx ts of 
       Just d -> d
       _ -> let parts = hsep $ map recc ts
-            in moveOriginBy (0, -1.3) . vsep' (-0.7)
-             $ [topper (width parts), centerX parts]
+            in moveOriginBy (0, -1.3)
+             -- . vsep' (-0.7) . (\p -> [topper (width p), p])
+             $ centerX parts
      where
       ts = splitTApp t
 
     draw (TyForall _ Nothing ctx' t) = -- rec ctx t --TODO 
       rec (ctx ++ get contextList ctx') t
     draw (TyForall _ bnds ctx' t)
-      = ( text "A" # scaleXY (0.2, -0.2)
+      = ( text' "A" # scaleY (-1)
 --           ||| -- ===
 --          vsep (zipWith prim (getVars bnds))
            ||| text "." # scaleXY (0.2, 0.2)
         ) ||| rec ctx t
 
-    draw (TyList _ x)  = hsep [ lbracket, draw x, rbracket ]
+    draw (TyList _ x)  = bracketDia $ draw x
     draw (TyParen _ x) = draw x -- hsep [ lparen,   draw x, rparen ]
     draw (TyTuple _ _ xs) = hsep
       $ [lparen] ++ intersperse tcross (map recc xs) ++ [rparen]
@@ -244,7 +245,7 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
     topper w = lined $ rotate (Deg (-90))
              $ bracket (1, w + 1)
     tcross   = lined $ cross (0.5, 0.5)
-    lbracket = lined $ bracket (1, 2.2)
-    rbracket = scaleX (-1) lbracket
+    bracketDia d = hsep [ centerY . lined $ bracket (1, h), d, centerY . lined $ bracket (-1, h) ]
+     where h = height d
     lparen   = scaleX (-1) rparen
     rparen   = lineWidth 0 . fc black . stroked $ bannana (2, 2) 0.1 0.3

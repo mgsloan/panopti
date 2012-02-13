@@ -16,14 +16,13 @@ import Data.Dynamic (fromDynamic)
 import Data.Generics.Aliases
 import Data.IORef
 import Data.Label
-import Data.List (intersperse, sort, findIndices)
-import Data.Maybe (listToMaybe, isJust)
-import Data.Supply
+import Data.List (find, findIndices)
+import Data.Maybe (isJust, fromMaybe)
 import Diagrams.Backend.Cairo.CmdLine
 import Diagrams.Backend.Cairo.Text (StyleParam, textLineBounded)
 import Diagrams.Prelude hiding ((===), (|||), fromDynamic)
 import Diagrams.TwoD.Text(Text(..))
-import Graphics.UI.Gtk.Toy.Prelude hiding (debug, debug', fromDynamic)
+import Graphics.UI.Gtk.Toy.Prelude hiding (debug, debug', fromDynamic, ivlContains)
 import Language.Haskell.Exts.Annotated
 import qualified Data.Map as M
 
@@ -46,12 +45,28 @@ coloredShapes names
 drawCode :: MarkedText (Versioned Ann) -> CairoDiagram
 drawCode mt
   = vcat
-  . map (draw . substrText True sorted . second (+1))
+  . map (draw . substrText True mtSorted . second (+1))
   . ivlsFromSlices (textLength mt)
   . findIndices (=='\n')
   $ get mText mt
  where
-  sorted = modify mMarks sortMarks mt
+  mtSorted = modify mMarks sortMarks mt
+
+  marks = get mMarks mtSorted
+
+  subsetIx = debug $ case find (isCursor . snd) $ get mMarks mt of
+    Just (civl, _) 
+     -> fromMaybe 0
+      $ lastMay [s | (mivl, Version (SubsetA (s, _) _) _) <- marks, mivl `ivlContains` civl]
+    Nothing -> 0
+
+  drawText = draw . (`MarkedText` [])
+
+  drawType = scale 5 . typeDiagram "" shapes (const $ const $ const Nothing)
+
+  shapes = coloredShapes . map prettyPrint $ uniquePrims allTypes
+
+  allTypes = [x | (_, Version (TypeA (s, _) x) _) <- marks, s == subsetIx]
 
   draw (MarkedText txt [])
     = monotext $ filter (not . (`elem` "\r\n")) txt
@@ -64,22 +79,25 @@ drawCode mt
     mt = MarkedText txt xs
 
     handleMark CursorA = drawMark CursorMark txt . draw
-    handleMark (TypeA _ ty) = (=== drawType ty) . draw
+    handleMark (TypeA (s, _) ty) 
+      | s == subsetIx = (\x -> x === drawType ty) . draw
+      | otherwise = draw
+    handleMark (SubsetA (s, _) tyc) 
+      | s == subsetIx = (\x -> x === drawText (show tyc)) . draw
+      | otherwise = draw
     handleMark (AstA d)
-      = \t -> let t' = debugMarks (show $ length txt) $ removeAstMarks t
-               in maybe (draw t') id  $ msum
-                [ drawExpr t' <$> fromDynamic d ]
+      = \t -> let t' = removeAstMarks t 
+               in maybe (draw t') id $ msum [ drawExpr t' <$> fromDynamic d ]
     handleMark _ = draw
-  
     -- TODO: find position of ->
     drawExpr t l@(Lambda _ pats expr)
       =   drawText "λ"
-      ||| draw (debugMarks "bnds " $ substrText True t bndsIvl)
+      ||| draw (substrText True t bndsIvl)
       ||| alignB (lined (arrow (20, 0) (5, 5)))
       ||| strutX 10
-      ||| draw (debugMarks "cnt " $ substrText True t exprIvl)
+      ||| draw (substrText True t exprIvl)
      where
-      offset = debug $ fm - fst (annSpan l)
+      offset = fm - fst (annSpan l)
       bndsIvl = first (subtract 1) . mapT (+offset) . foldl1 ivlUnion $ map annSpan pats
       exprIvl = first (subtract 1) . mapT (+offset) $ annSpan expr
 --    drawExpr t e@()
@@ -92,13 +110,6 @@ drawCode mt
         = i == (0, length txt - 1) -- && isJust (fromDynamic d :: Maybe ExpS)
       isTopExpr _ = False
 
-  drawText = draw . (`MarkedText` [])
-
-  drawType = scale 5 . typeDiagram "" shapes (const $ const $ const Nothing)
-
-  allTypes = [x | (_, Version (TypeA _ x) _) <- get mMarks mt]
-
-  shapes = coloredShapes . map prettyPrint $ uniquePrims allTypes
 
 {-
 ivlsGaps :: (Int, Int) -> [(Int, Int)] -> [(Int, Int)]

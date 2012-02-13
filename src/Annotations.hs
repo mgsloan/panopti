@@ -19,7 +19,6 @@ import Language.Haskell.Exts.Annotated.Syntax
 
 deriving instance Show Ann
 
-
 instance Eq Ann where
   CursorA     == CursorA   = True
   ParseResA a == ParseResA b = a == b
