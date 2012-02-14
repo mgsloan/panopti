@@ -20,7 +20,6 @@ executable panopti
                      Annotations
                      Brace
                      ErrorParser
-                     ExprDiagrams
                      PartialParse
                      TypeDiagrams
                      TypeInfo

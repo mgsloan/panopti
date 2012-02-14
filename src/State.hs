@@ -32,7 +32,8 @@ type VersionNumber = Int
 data Ann
   = CursorA
   | AstA Dynamic
-  | AppA DeclS
+--  | AppA DeclS
+  | AppA [Ivl]
   | TypeA SubsetId TypeS
   | ErrorA Cause
   | SubsetA SubsetId [TypeResolution]

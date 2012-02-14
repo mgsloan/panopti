@@ -1,25 +1,31 @@
 {-# LANGUAGE FlexibleContexts, TypeFamilies, ViewPatterns, TupleSections #-}
 
 module TypeDiagrams
-  ( typeDiagram
+  ( drawCode
+  , typeDiagram
   , lined, arrow ) where
 
+import Annotations
+import State
+import Utils
+
 import Control.Monad
-import Control.Arrow ((&&&), second)
+import Control.Arrow ((***), (&&&), first, second)
+import Data.Data hiding (typeOf)
 import Data.Default
+import Data.Dynamic (fromDynamic)
 import Data.Foldable (concat)
 import Data.IORef
 import Data.Label
-import Data.List (intersperse, sort)
-import Data.Maybe (catMaybes)
+import Data.List (intersperse, sort, find, findIndices)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Monoid (Monoid)
 import Data.Supply
-import Diagrams.Prelude hiding ((===), (|||), trim)
 import Diagrams.Backend.Cairo.CmdLine
 import Diagrams.Backend.Cairo.Text (StyleParam, textLineBounded)
 import Graphics.UI.Gtk.Toy.Diagrams
+import Graphics.UI.Gtk.Toy.Prelude hiding ((===), (|||), trim, debug, debug', fromDynamic, ivlContains)
 import Prelude hiding (concat)
-import Utils
 import Language.Haskell.Exts.Annotated
 import qualified Data.Map as M
 
@@ -39,6 +45,7 @@ popSupply r = unsafePerformIO $ do
 coloredShapes :: [String] -> M.Map String CairoDiagram
 coloredShapes names
   = M.fromList 
+  . (++ [("Int", scale 0.2 $ monoText "Z")])
   . zip names
   $ zipWith (\i c -> fc c $ polygon $ def {polyType = PolyRegular i 1.0}) [4..]
     [aqua, crimson, brown, fuchsia, khaki, indigo, papayawhip, thistle]
@@ -58,6 +65,102 @@ main = do
   defaultMain ((centerXY dia) `atop` (centerXY bg))
  where
   parseT = mustOk . parseIt
+
+monoText :: String -> CairoDiagram
+monoText = textLineBounded monoStyle 
+
+drawCode :: MarkedText (Versioned Ann) -> CairoDiagram
+drawCode mt
+  = vcat
+  . map (draw . substrText True mtSorted . second (+1))
+  . ivlsFromSlices (textLength mt)
+  . findIndices (=='\n')
+  $ get mText mt
+ where
+  mtSorted = modify mMarks sortMarks mt
+
+  marks = get mMarks mtSorted
+
+  subsetIx = case filter (isCursor . snd) marks of
+    (ivl, _) : _ -> fromMaybe 0 $ do
+      (i, m) <- smallestEnclosing isSubsetA ivl mt
+      (s, _) <- getSubset m
+      return s
+    [] -> 0
+
+  drawText = draw . (`MarkedText` [])
+
+  drawType = scale 5 . typeDiagram "" shapes (const $ const $ const Nothing)
+
+  shapes = coloredShapes . map prettyPrint $ uniquePrims allTypes
+
+  allTypes = [x | (_, Version _ (TypeA (s, _) x)) <- marks, s == subsetIx]
+
+  draw (MarkedText txt [])
+    = monoText $ filter (not . (`elem` "\r\n")) txt
+
+  draw (MarkedText txt (((fm, tm), m):xs))
+    =   drawSubstr mt (-1, fm)
+    ||| handleMark (get versionValue m) (substrText True mt (fm, tm))
+    ||| drawSubstr mt (tm, length txt + 1)
+   where
+    mt = MarkedText txt xs
+
+    drawSubstr mt' ivl = draw $ substrText False mt' ivl
+
+    handleMark CursorA -- = drawMark CursorMark txt . draw
+      = \mt' -> case get mText mt' of
+          "" -> lineWidth 1 . lineColor black
+              . moveOriginBy (-1.5, 2)
+              . setBounds mempty
+              . stroke . pathFromTrail
+              $ Trail [Linear (0, 18)] False
+          _ -> draw mt'
+             # fc white
+             # highlight black
+
+    handleMark (AppA ivls)
+      = \mt' -> let rec = map (drawSubstr mt') ivls
+                    w = width rec
+                in hsep rec
+                   === hrule w === text' "App"
+
+    handleMark (TypeA (s, _) ty)
+      | s == subsetIx = (\x -> x === drawType ty) . draw
+      | otherwise = draw
+    
+    handleMark (SubsetA (s, _) tyc)
+      | s == subsetIx = (\x -> x === drawText (show tyc)) . draw
+      | otherwise = draw
+
+    handleMark (AstA d)
+      = \t -> let t' = removeAstMarks t 
+               in maybe (draw t') id $ msum [ drawExpr t' <$> fromDynamic d ]
+
+    handleMark _ = draw
+
+    -- TODO: find position of ->
+    drawExpr t l@(Lambda _ pats expr)
+      =   drawText "λ"
+      ||| drawSubstr t bndsIvl
+      ||| alignB (lined (arrow (20, 0) (5, 5)))
+      ||| strutX 10
+      ||| drawSubstr t exprIvl
+     where
+      offset = fm - fst (annSpan l)
+      bndsIvl = (\(fr, to) -> (fr + offset - 1, to + offset)) 
+              . foldl1 ivlUnion $ map annSpan pats
+      exprIvl = first (subtract 1) . mapT (+offset) $ annSpan expr
+--    drawExpr t e@()
+    drawExpr t _ = draw t
+
+    removeAstMarks (MarkedText txt ms)
+      = MarkedText txt $ filter (not . isTopExpr . second (get versionValue)) ms
+     where
+      isTopExpr (i, AstA d)
+        = i == (0, length txt - 1) -- && isJust (fromDynamic d :: Maybe ExpS)
+      isTopExpr _ = False
+
 
 type TypeDiagram = [AsstS] -> TypeS -> CairoDiagram
 
@@ -93,13 +196,15 @@ ltrail = Trail . map Linear
 scaleXY (x, y) = scaleX x . scaleY y
 
 hsep, vsep
-  :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
+  :: ( HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a
+     , V a ~ (Double, Double) )
   => [a] -> a
 hsep = hcat' (def {sep = 1})
 vsep = vcat' (def {sep = 1})
 
 hsep', vsep' 
-  :: (HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a, V a ~ (Double, Double))
+  :: ( HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a
+     , V a ~ (Double, Double) )
   => Double -> [a] -> a
 hsep' s = hcat' (def {sep = s})
 vsep' s = vcat' (def {sep = s})
@@ -123,7 +228,7 @@ expandRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
 expandRectBounds (x, y) d = setRectBounds (width d + x, height d + y) d
 
 text' :: String -> CairoDiagram
-text' = centerY . scale 0.1 . textLineBounded (fontSize 14)
+text' = centerY . textLineBounded (fontSize 14)
 
 arrow :: ( Floating (Scalar t)
          , Num t

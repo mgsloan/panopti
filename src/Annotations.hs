@@ -70,17 +70,20 @@ instance CanBeCursor a => CanBeCursor (Versioned a) where
   mkCursor = Version 0 mkCursor
 
 astAnns :: Data a => a -> [(Ivl, Ann)]
-astAnns x = maybe children (:children) 
-          $ (, AstA $ toDyn x) . colSpan <$> getSpan x
- where
-  children :: [(Ivl, Ann)]
-  children = concat $ gmapQ astAnns x
+astAnns x = (++ concat (gmapQ astAnns x)) . maybeToList $ do
+  ivl@(f, _) <- get colSpan <$> getSpan x
+  return (ivl, AstA . toDyn $ mutateSpans' (mapT $ subtract f) x)
 
 annIvl :: Annotated a => a SrcSpanInfo -> Ivl
-annIvl = colSpan . srcInfoSpan . ann
+annIvl = get colSpan . srcInfoSpan . ann
 
 appAnns :: DeclMap -> [(Ivl, Ann)]
-appAnns = map ((annIvl &&& AppA) . snd) . M.toList
+appAnns dm = [ (ivl, AppA ivls)
+             | d <- M.elems dm
+             , let ivl@(f, _) = annIvl d
+             , let ivls = map (mapT (subtract f) . annIvl)
+                        . splitEApp' $ get funExpr d
+             ]
 
 typeAnns :: SubsetId -> TypedDecls -> [(Ivl, Ann)]
 typeAnns sub = map (annIvl *** TypeA sub)
@@ -94,5 +97,14 @@ subsetsAnns = concat . concat . zipWith (\i -> zipWith (anns i) [0..]) [0..]
    where
     tas = typeAnns (i, j) d
 
-isParseResA (ParseResA _) = True
-isParseResA _ = False
+isCursorA   (Version _  CursorA     ) = True; isCursorA   _ = False
+isAstA      (Version _ (AstA      _)) = True; isAstA      _ = False
+isAppA      (Version _ (AppA      _)) = True; isAppA      _ = False
+isTypeA     (Version _ (TypeA   _ _)) = True; isTypeA     _ = False
+isErrorA    (Version _ (ErrorA    _)) = True; isErrorA    _ = False
+isSubsetA   (Version _ (SubsetA _ _)) = True; isSubsetA   _ = False
+isParseResA (Version _ (ParseResA _)) = True; isParseResA _ = False
+
+getSubset (Version _ (SubsetA s _)) = Just s
+getSubset (Version _ (TypeA   s _)) = Just s
+getSubset _ = Nothing

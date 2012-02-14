@@ -2,7 +2,7 @@
            , StandaloneDeriving #-}
 
 import Annotations
-import ExprDiagrams
+import TypeDiagrams
 import TypeInfo     (whereify, getSubsets, subsetTypes)
 import PartialParse (partialParse)
 import State
@@ -82,7 +82,7 @@ update s = do
  where
   (e, prs) = partialParse parseIt $ get (mText . code) s
   prms = map (second $ Version 0 . ParseResA) prs
-  remPrms = filterMarks $ not . isParseResA . get versionValue . snd
+  remPrms = filterMarks $ not . isParseResA . snd
 
 timeoutMs = 200
 

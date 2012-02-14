@@ -273,18 +273,27 @@ csort :: (a -> Ivl) -> [a] -> [a]
 csort f = sortBy $ comparing (\x -> ivlWidth $ f x)
 --csort f = sortBy $ comparing (\x -> length . filter ((`ivlContains` f x) . f))
 
-colSpan :: SrcSpan -> Ivl
-colSpan = (subtract 1 *** subtract 1) . (srcSpanStartColumn &&& srcSpanEndColumn)
+colSpan :: SrcSpan :-> Ivl
+colSpan = lens getCol setCol
+ where
+  getCol = (subtract 1 *** subtract 1) . (srcSpanStartColumn &&& srcSpanEndColumn)
+  setCol (sc', ec') (SrcSpan f sl sc el ec) = SrcSpan f sl sc' el ec'
 
 getSpan :: (Data a) => a -> Maybe SrcSpan
 getSpan = listToMaybe . catMaybes
         . gmapQ (const Nothing `extQ` (Just . srcInfoSpan))
 
+mutateSpans :: (Data a) => (SrcSpan -> SrcSpan) -> a -> a
+mutateSpans f = gmapT (mutateSpans f `extT` f)
+
+mutateSpans' :: (Data a) => (Ivl -> Ivl) -> a -> a
+mutateSpans' f = mutateSpans (modify colSpan f)
+
 getSpan' :: (Data a) => a -> Ivl
-getSpan' = colSpan . fromJust . getSpan
+getSpan' = get colSpan . fromJust . getSpan
 
 annSpan :: (Annotated a) => a SrcSpanInfo -> Ivl
-annSpan = colSpan . srcInfoSpan . ann
+annSpan = get colSpan . srcInfoSpan . ann
 
 spanContains :: SrcSpan -> SrcLoc -> Bool 
 spanContains (SrcSpan f sl sc el ec) (SrcLoc f' l c)
@@ -465,6 +474,20 @@ buildEApp = helper . reverse
   helper [t] = t
   helper (b : a) = App sp (helper a) b
 
+splitEApp' :: ExpS -> [ExpS]
+splitEApp' = reverse . helper
+ where
+  helper (App _ a b) = b : helper a
+  helper (LeftSection _ l o) = [convertOp o, l]
+  -- TODO: uhhhhh this is wrong.
+  helper (RightSection _ o r) = [convertOp o, r]
+  helper (InfixApp _ l o r) = [convertOp o, l, r]
+  helper t = [t]
+
+convertOp :: QOpS -> ExpS
+convertOp (QVarOp l n) = Var l n
+convertOp (QConOp l n) = Con l n
+
 splitTFunc :: TypeS -> [TypeS]
 splitTFunc (TyFun _ a b) = a : splitTFunc b
 splitTFunc t = [t]
@@ -548,7 +571,7 @@ atSpan s = child `extQ` (\x -> ifContains (whenExp x) x)
   ifContains :: (Data a) => Maybe b -> a -> Maybe b
   ifContains b x = do
     sp <- getSpan x
-    if colSpan sp `ivlContains` s then b else Nothing
+    if get colSpan sp `ivlContains` s then b else Nothing
   whenExp :: ExpS -> Maybe ExpS
   whenExp x = maybe (Just x) Just $ child x
   child :: (Data x) => x -> Maybe ExpS
@@ -564,6 +587,7 @@ type TypeS    = Type    SrcSpanInfo
 type ContextS = Context SrcSpanInfo
 type AsstS    = Asst    SrcSpanInfo
 type QNameS   = QName   SrcSpanInfo
+type QOpS     = QOp     SrcSpanInfo
 
 instance (Eq a) => Eq (ParseResult a) where
   (ParseOk x)       == (ParseOk y)       = x == y
