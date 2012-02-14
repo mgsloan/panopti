@@ -57,7 +57,7 @@ drawCode mt
   subsetIx = debug $ case find (isCursor . snd) $ get mMarks mt of
     Just (civl, _) 
      -> fromMaybe 0
-      $ lastMay [s | (mivl, Version (SubsetA (s, _) _) _) <- marks, mivl `ivlContains` civl]
+      $ lastMay [s | (mivl, Version _ (SubsetA (s, _) _)) <- marks, mivl `ivlContains` civl]
     Nothing -> 0
 
   drawText = draw . (`MarkedText` [])
@@ -66,7 +66,7 @@ drawCode mt
 
   shapes = coloredShapes . map prettyPrint $ uniquePrims allTypes
 
-  allTypes = [x | (_, Version (TypeA (s, _) x) _) <- marks, s == subsetIx]
+  allTypes = [x | (_, Version _ (TypeA (s, _) x)) <- marks, s == subsetIx]
 
   draw (MarkedText txt [])
     = monotext $ filter (not . (`elem` "\r\n")) txt
@@ -78,7 +78,16 @@ drawCode mt
    where
     mt = MarkedText txt xs
 
-    handleMark CursorA = drawMark CursorMark txt . draw
+    handleMark CursorA -- = drawMark CursorMark txt . draw
+      = \mt -> case get mText mt of
+          "" -> lineWidth 1 . lineColor black
+              . moveOriginBy (-1.5, 2)
+              . setBounds mempty
+              . stroke . pathFromTrail
+              $ Trail [Linear (0, 18)] False
+          _ -> draw mt
+             # fc white
+             # highlight black          
     handleMark (TypeA (s, _) ty) 
       | s == subsetIx = (\x -> x === drawType ty) . draw
       | otherwise = draw

@@ -44,12 +44,13 @@ instance GtkInteractive (IORef State) where
 instance Diagrammable State Cairo R2 where
   toDiagram (State _ c r _)
     = scaleY (-1) . (strutX 50 |||) . (strutY 58 |||)
-    $ (alignT $ plainText "> " ||| drawCode c)
+    $ (alignT $ textString "> " ||| drawCode c)
         ===
       alignL r
 
-plainText :: String -> CairoDiagram
-plainText = monoText . (`MarkedText` ([] :: [(Ivl, CursorMark)]))
+textString :: String -> CairoDiagram
+textString = drawText (StyleState monoStyle)
+           . (plainText :: String -> MarkedText CursorMark)
 
 -- Needed in order to be able to provide a witness for CairoDiagram.
 deriving instance Typeable Any
@@ -67,7 +68,7 @@ update s = do
 
       types <- mapM (subsetTypes tchan) subs
     
-      let anns = prms ++ map (second (`Version` 0))
+      let anns = prms ++ map (second $ Version 0)
                ( astAnns e'
               ++ appAnns (snd apps)
               ++ subsetsAnns types
@@ -76,11 +77,11 @@ update s = do
       val <- interpret (get chan s) "MyMain"
            $ Ghci.interpret (get (mText . code) s) (mempty :: CairoDiagram)
 
-      return . set result (either (plainText . show) id val)
+      return . set result (either (textString . show) id val)
              $ modify code (addMarks anns . filterMarks (isCursor . snd)) s
  where
   (e, prs) = partialParse parseIt $ get (mText . code) s
-  prms = map (second $ (`Version` 0) . ParseResA) prs
+  prms = map (second $ Version 0 . ParseResA) prs
   remPrms = filterMarks $ not . isParseResA . get versionValue . snd
 
 timeoutMs = 200

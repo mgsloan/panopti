@@ -22,8 +22,8 @@ data State = State
 
 data Versioned a 
   = Version
-  { _versionValue :: a
-  , _versionNumber :: VersionNumber
+  { _versionNumber :: VersionNumber
+  , _versionValue :: a
   }
  deriving (Eq, Show)
 

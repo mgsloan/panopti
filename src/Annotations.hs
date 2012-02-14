@@ -1,4 +1,4 @@
-{-# LANGUAGE StandaloneDeriving, TupleSections #-}
+{-# LANGUAGE StandaloneDeriving, TupleSections, TypeFamilies #-}
 module Annotations where
 
 import State
@@ -28,8 +28,16 @@ instance Eq Ann where
   _ == _ = False
 
 instance Mark Ann where
-  drawMark CursorA = drawMark CursorMark
-  drawMark _ = const id
+  type DrawState Ann = StyleState
+  {-
+  initialDrawState _ = StyleState monoStyle
+  drawStateStyle _ (StyleState s) = s
+  drawMark f CursorA = drawMark f CursorMark
+  drawMark f _ = f
+  -}
+  initialDrawState = undefined
+  drawStateStyle = undefined
+  drawMark = undefined
 --  drawMark (ParseResA x) = 
 --  drawMark (ParseResA p) = 
   mergeMark CursorA CursorA = Just CursorA
@@ -42,16 +50,24 @@ instance CanBeCursor Ann where
   mkCursor         = CursorA
 
 instance Mark a => Mark (Versioned a) where
-  styleMark = styleMark . get versionValue
-  drawMark  = drawMark  . get versionValue
-  mergeMark = const $ const Nothing
---TODO
---  mergeMark a b = Versioned . mergeMark (get versionValue a) (get versionValue b)
+  type DrawState (Versioned a) = DrawState a
+  initialDrawState = undefined
+  drawStateStyle = undefined
+  drawMark = undefined
+  {-
+  initialDrawState _ = initialDrawState (emptyText :: MarkedText a)
+  drawStateStyle _ = drawStateStyle (emptyText :: MarkedText a)
+                   . get versionValue
+  drawMark x s m = drawMark (get versionValue x) s m
+  -}
+  mergeMark (Version na va) (Version nb vb)
+    | na == nb = Version na <$> mergeMark va vb
+    | otherwise = Nothing
   
 instance CanBeCursor a => CanBeCursor (Versioned a) where
   isCursor = isCursor . get versionValue
   --TODO: uhh
-  mkCursor = Version mkCursor 0
+  mkCursor = Version 0 mkCursor
 
 astAnns :: Data a => a -> [(Ivl, Ann)]
 astAnns x = maybe children (:children) 
