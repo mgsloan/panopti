@@ -36,7 +36,7 @@ import GHC.Paths ( libdir )
 import Data.Data
 
 
-targetMod = "Test1"
+targetMod = "MyMain"
  
 main = example
 
@@ -51,9 +51,12 @@ example =
         GHC.load GHC.LoadAllTargets
         modSum <- GHC.getModSummary $ GHC.mkModuleName targetMod
         p <- GHC.parseModule modSum
+        t <- GHC.typecheckModule p
         let p' = processParsedMod shortenLists p
+            t' = tm_typechecked_source t
         GHC.liftIO (putStrLn . showParsedModule $ p)
         GHC.liftIO (putStrLn . showParsedModule $ p')
+        GHC.liftIO (putStrLn $ showData TypeChecker 0 t')
 
 showParsedModule p = showData Parser  0 (GHC.pm_parsed_source  p)
 
@@ -89,6 +92,7 @@ shortenLists x                          = x
 
 data Stage = Parser | Renamer | TypeChecker deriving (Eq,Ord,Show)
 
+type BLB a = Bag (Located (HsBind a))
 
 showData :: Data a => Stage -> Int -> a -> String
 showData stage n =
@@ -104,34 +108,37 @@ showData stage n =
         space s  = ' ':s
         indent n = "\n" ++ replicate n ' '
         string     = show :: String -> String
-        fastString = ("{FastString: "++) . (++"}") . show :: FastString -> String
         list l     = indent n ++ "["
                               ++ concat (intersperse "," (map (showData stage (n+1)) l)) ++ "]"
 
-        name       = ("{Name: "++) . (++"}") . showSDoc . ppr :: Name -> String
-        occName    = ("{OccName: "++) . (++"}") .  OccName.occNameString 
-        moduleName = ("{ModuleName: "++) . (++"}") . showSDoc . ppr :: ModuleName -> String
-        srcSpan    = ("{"++) . (++"}") . showSDoc . ppr :: SrcSpan -> String
-        var        = ("{Var: "++) . (++"}") . showSDoc . ppr :: Var -> String
-        dataCon    = ("{DataCon: "++) . (++"}") . showSDoc . ppr :: DataCon -> String
+        br n = (("{" ++ n) ++) . (++ "}")
+        brshow n = br n . show
+        brppr  n = br n . showSDoc . ppr 
+        brblb  n = br n . list . bagToList
 
-        bagRdrName:: Bag (Located (HsBind RdrName)) -> String
-        bagRdrName = ("{Bag(Located (HsBind RdrName)): "++) . (++"}") . list . bagToList
-        bagName   :: Bag (Located (HsBind Name)) -> String
-        bagName    = ("{Bag(Located (HsBind Name)): "++) . (++"}") . list . bagToList
-        bagVar    :: Bag (Located (HsBind Var)) -> String
-        bagVar     = ("{Bag(Located (HsBind Var)): "++) . (++"}") . list . bagToList
+        occName    = br    "OccName: " . OccName.occNameString
+        fastString = brshow "FastString: " :: FastString  -> String
+
+        name       = brppr "Name: "        :: Name        -> String
+        moduleName = brppr "ModuleName: "  :: ModuleName  -> String
+        srcSpan    = brppr ""              :: SrcSpan     -> String
+        var        = brppr "Var: "         :: Var         -> String
+        dataCon    = brppr "DataCon: "     :: DataCon     -> String
+
+        bagRdrName = brblb "BLB RdrName: " :: BLB RdrName -> String
+        bagName    = brblb "BLB Name: "    :: BLB Name    -> String
+        bagVar     = brblb "BLB Name: "    :: BLB Var     -> String
 
         nameSet | stage `elem` [Parser,TypeChecker] 
                 = const ("{!NameSet placeholder here!}") :: NameSet -> String
                 | otherwise
-                = ("{NameSet: "++) . (++"}") . list . nameSetToList
+                = br "NameSet: " . list . nameSetToList
 
         postTcType | stage<TypeChecker = const "{!type placeholder here?!}" :: PostTcType -> String
                    | otherwise     = showSDoc . ppr :: Type -> String
 
         fixity | stage<Renamer = const "{!fixity placeholder here?!}" :: GHC.Fixity -> String
-               | otherwise     = ("{Fixity: "++) . (++"}") . showSDoc . ppr :: GHC.Fixity -> String
+               | otherwise     = brppr "Fixity: " :: GHC.Fixity -> String
 
         syntaxExprExpr :: HsExpr RdrName -> String
         syntaxExprExpr (NegApp e1 e2)           | stage < Renamer = "todo: NegApp"
