@@ -13,7 +13,7 @@ import Data.Generics.Aliases
 import Data.Label
 import qualified Data.Map as M
 import Data.Maybe (listToMaybe, catMaybes, maybeToList)
-import Graphics.UI.Gtk.Toy.Text hiding (Ivl)
+import Graphics.UI.Gtk.Toy.Text hiding (Ivl, debug)
 import Language.Haskell.Exts.Annotated
 import Language.Haskell.Exts.Annotated.Syntax
 
@@ -43,6 +43,9 @@ instance Mark Ann where
   mergeMark CursorA CursorA = Just CursorA
   mergeMark x y = if x == y then Just x else Nothing
   mergeMark _ _ = Nothing
+  splitMark _ CursorA = (Just CursorA, Just CursorA)
+  splitMark _ x@(SubsetA _ _) = (Just x, Just x)
+  splitMark _ _ = (Nothing, Nothing)
 
 instance CanBeCursor Ann where
   isCursor CursorA = True
@@ -72,18 +75,21 @@ instance CanBeCursor a => CanBeCursor (Versioned a) where
 astAnns :: Data a => a -> [(Ivl, Ann)]
 astAnns x = (++ concat (gmapQ astAnns x)) . maybeToList $ do
   ivl@(f, _) <- get colSpan <$> getSpan x
-  return (ivl, AstA . toDyn $ mutateSpans' (mapT $ subtract f) x)
+  return (ivl, AstA . toDyn $ mutateSpans' (\(fr, to) -> (fr + 1 - f, to - f + 1)) x)
 
 annIvl :: Annotated a => a SrcSpanInfo -> Ivl
 annIvl = get colSpan . srcInfoSpan . ann
 
+{-
 appAnns :: DeclMap -> [(Ivl, Ann)]
 appAnns dm = [ (ivl, AppA ivls)
              | d <- M.elems dm
              , let ivl@(f, _) = annIvl d
              , let ivls = map (mapT (subtract f) . annIvl)
-                        . splitEApp' $ get funExpr d
+                        . splitEApp' . debug $ get funExpr d
+             , length (debug ivls) > 1   --TODO: inefficient
              ]
+-}
 
 typeAnns :: SubsetId -> TypedDecls -> [(Ivl, Ann)]
 typeAnns sub = map (annIvl *** TypeA sub)

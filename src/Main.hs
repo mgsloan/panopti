@@ -24,7 +24,7 @@ import Graphics.UI.Gtk.Toy.Prelude
 main :: IO ()
 main = do
   ch <- startGHCiServer ["."] print print
-  let state = State ch cursorText mempty 0
+  let state = State ch (addText cursorText $ plainText "map (+1) [1..10]./") mempty 0
   runToy =<< newIORef state
 
 modifyIORefM' f sr = do
@@ -67,10 +67,10 @@ update s = do
       subs <- getSubsets apps tchan
 
       types <- mapM (subsetTypes tchan) subs
-    
+
       let anns = prms ++ map (second $ Version 0)
                ( astAnns e'
-              ++ appAnns (snd apps)
+              -- ++ appAnns (snd apps)
               ++ subsetsAnns types
                )
 

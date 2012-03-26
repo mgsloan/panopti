@@ -9,8 +9,9 @@ import Annotations
 import State
 import Utils
 
-import Control.Monad
 import Control.Arrow ((***), (&&&), first, second)
+import Control.Monad
+import Control.Newtype
 import Data.Data hiding (typeOf)
 import Data.Default
 import Data.Dynamic (fromDynamic)
@@ -18,15 +19,18 @@ import Data.Foldable (concat)
 import Data.IORef
 import Data.Label
 import Data.List (intersperse, sort, find, findIndices)
+import Data.List.Split (splitWhen, splitOn)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Monoid (Monoid)
 import Data.Supply
 import Diagrams.Backend.Cairo.CmdLine
 import Diagrams.Backend.Cairo.Text (StyleParam, textLineBounded)
+import Graphics.Rendering.Diagrams.Names (NameMap(..), Name(..), AName(..))
 import Graphics.UI.Gtk.Toy.Diagrams
-import Graphics.UI.Gtk.Toy.Prelude hiding ((===), (|||), trim, debug, debug', fromDynamic, ivlContains)
+import Graphics.UI.Gtk.Toy.Prelude hiding 
+  ((===), (|||), trim, debug, debug', fromDynamic, ivlContains, Ivl)
 import Prelude hiding (concat)
-import Language.Haskell.Exts.Annotated
+import Language.Haskell.Exts.Annotated hiding (Name)
 import qualified Data.Map as M
 
 import System.IO.Unsafe
@@ -90,7 +94,15 @@ drawCode mt
 
   drawText = draw . (`MarkedText` [])
 
+  drawSubstr mt = draw . substrText False mt
+
   drawType = scale 5 . typeDiagram "" shapes (const $ const $ const Nothing)
+
+  drawIvlType ivl t =
+    case smallestEnclosing isTypeA ivl t of
+      Just (_, Version _ (TypeA (s, _) typ))
+        | s == subsetIx -> drawType typ
+      Nothing -> drawText "?"
 
   shapes = coloredShapes . map prettyPrint $ uniquePrims allTypes
 
@@ -106,53 +118,46 @@ drawCode mt
    where
     mt = MarkedText txt xs
 
-    drawSubstr mt' ivl = draw $ substrText False mt' ivl
+
+    includeGaps mt = ivlsFromSlices (textLength mt)
+                   . concatMap ivlSlices
 
     handleMark CursorA -- = drawMark CursorMark txt . draw
       = \mt' -> case get mText mt' of
           "" -> lineWidth 1 . lineColor black
               . moveOriginBy (-1.5, 2)
-              . setBounds mempty
-              . stroke . pathFromTrail
-              $ Trail [Linear (0, 18)] False
+              . setEnvelope mempty
+              $ drawSeg (0, 18)
           _ -> draw mt'
              # fc white
              # highlight black
 
+{-
     handleMark (AppA ivls)
-      = \mt' -> let rec = map (drawSubstr mt') ivls
+      = \mt' -> let rec = map (drawSubstr mt') $ includeGaps mt' ivls
                     w = width rec
-                in hsep rec
-                   === hrule w === text' "App"
+                in hsep rec === alignL (hrule w) === texts "App"
+ -}
 
+{-
     handleMark (TypeA (s, _) ty)
       | s == subsetIx = (\x -> x === drawType ty) . draw
       | otherwise = draw
+ -}
     
+    {-
     handleMark (SubsetA (s, _) tyc)
       | s == subsetIx = (\x -> x === drawText (show tyc)) . draw
       | otherwise = draw
+    -}
 
     handleMark (AstA d)
       = \t -> let t' = removeAstMarks t 
-               in maybe (draw t') id $ msum [ drawExpr t' <$> fromDynamic d ]
+               in maybe (draw t') id
+                $ msum [ drawExpr t' <$> fromDynamic d
+                       , drawOp   t' <$> fromDynamic d ]
 
     handleMark _ = draw
-
-    -- TODO: find position of ->
-    drawExpr t l@(Lambda _ pats expr)
-      =   drawText "λ"
-      ||| drawSubstr t bndsIvl
-      ||| alignB (lined (arrow (20, 0) (5, 5)))
-      ||| strutX 10
-      ||| drawSubstr t exprIvl
-     where
-      offset = fm - fst (annSpan l)
-      bndsIvl = (\(fr, to) -> (fr + offset - 1, to + offset)) 
-              . foldl1 ivlUnion $ map annSpan pats
-      exprIvl = first (subtract 1) . mapT (+offset) $ annSpan expr
---    drawExpr t e@()
-    drawExpr t _ = draw t
 
     removeAstMarks (MarkedText txt ms)
       = MarkedText txt $ filter (not . isTopExpr . second (get versionValue)) ms
@@ -161,6 +166,185 @@ drawCode mt
         = i == (0, length txt - 1) -- && isJust (fromDynamic d :: Maybe ExpS)
       isTopExpr _ = False
 
+    -- TODO: show (via highlight) which parts are part of the code
+
+    -- TODO: find position of ->
+    drawExpr t (InfixApp _ l o r) = hcat
+      [ drawSubstr t soIvl
+      , drawSubstr t oIvl
+      , drawSubstr t oeIvl
+      ]
+     where
+      [soIvl, oIvl, oeIvl] = includeGaps mt [annSpan o]
+
+    drawExpr t a@(App _ l r) = drawApp t a
+--      [ drawSubstr t ]
+
+    drawExpr t (Lambda _ pats expr) = hcat
+      [ drawText "λ"
+      , drawSubstr t bs
+      , strutX 10
+      , alignB . lined $ arrow (20, 0) (5, 5)
+      , strutX 10
+      , drawSubstr t e
+      , drawSubstr t pe
+      ]
+     where
+      [pbs, bs, m, e, pe]
+        = includeGaps t [foldl1 ivlUnion $ map annSpan pats, annSpan expr]
+    
+    drawExpr t (EnumFrom       _ f)
+      = drawEnum t (annSpan f) Nothing
+    drawExpr t (EnumFromTo     _ f to)
+      = drawEnum t (annSpan f) . Just $ annSpan to
+    drawExpr t (EnumFromThen   _ f th)
+      = drawEnum t (ivlUnion (annSpan f) $ annSpan th) Nothing
+    drawExpr t (EnumFromThenTo _ f th to)
+      = drawEnum t (ivlUnion (annSpan f) $ annSpan th) . Just $ annSpan to
+
+    drawExpr t _ = draw t
+
+    drawApp :: MarkedText (Versioned Ann) -> ExpS -> CairoDiagram
+    drawApp t a@(App _ _ _)
+      = dia <> appBar
+     where
+      appBar :: CairoDiagram
+      appBar = foldl1 (<>) . zipWith lineBetween ps $ tail ps
+
+      lineBetween :: Point R2 -> Point R2 -> CairoDiagram
+      lineBetween p1 p2 = scale (-1) . moveOriginTo p1 $ drawSeg (p2 .-. p1)
+
+      ps = map (location . head) . catMaybes $ map (\n -> lookupN n (names dia)) xs
+
+      dia = hcat . zipWith tDia xs . ((strutY 5 ===):) $ repeat id
+
+      tDia ivl f = drawSubstr t ivl === (named ivl . f $ drawIvlType ivl t)
+
+      xs = map annSpan $ splitEApp a
+
+      {-
+        lPos :: [Point R2]
+        lPos ivl = [ location $ head p 
+               | n <- M.assocs . unpack $ names dia
+               , let (Name (AName (cast -> Just nivl):_), p) = n
+               , nivl == ivl
+               ]
+
+       dia = ( drawSubstr t lIvl
+              === 
+              (--if isApp l then mempty else 
+                named (rt,lIvl) $ drawIvlType lIvl t) )
+
+    drawApp t l r = dia <> case tPos of
+      (tr:tl:_) -> 
+                   -- moveOriginTo tl $ drawSeg (tr .-. tl)
+                   {- moveOriginTo (scaleX (-1) tr) (circle 5)
+                   <> moveOriginTo (scaleX (-1) tl) (circle 10)
+                   -}
+      _ -> mempty
+     where
+      lIvl = annSpan l
+      rIvl = annSpan r
+
+        ||| ( drawSubstr t rIvl 
+              === 
+              (named (rt,rIvl) . (strutY 2 ===) $ drawIvlType rIvl t) )
+      
+      rt = "result type"
+
+      ns :: [(Name, Point R2)]
+      ns = map (second $ location . head) . M.assocs . unpack $ names dia
+
+      tPos :: [Point R2]
+      tPos = [p | (Name (AName (cast -> Just ("result type", ivl :: Ivl)):_), p) <- ns]
+      -}
+
+--    drawExpr t (NegApp _ l) = hcat
+
+    ellipsis = translateY 2.5 (c1 ||| c1 ||| c1)
+     where c1 = circle 0.1 ||| strutX 3
+
+    drawEnum t (_, fr) to = hcat
+      [ drawSubstr t (0, fr)
+      , strutX 2
+      , ellipsis
+      , maybe mempty (drawSubstr t . (second $ const $ textLength t)) to
+      ]
+
+-- TODO: special cases for %
+
+    fancy = "@$%?%"
+
+    drawOp t op = case op of
+      QVarOp _ o -> helper o
+      QConOp _ o -> helper o
+     where
+      helper (Qual _ mn n) = drawText (prettyPrint $ Qual sp mn $ Symbol sp "")
+                          ||| drawOp' (prettyPrint n)
+      helper v = drawOp' . init . tail $ prettyPrint v
+
+    drawOp' :: String -> CairoDiagram
+    drawOp' = hcat . map (translateY 5.5 . helper)
+     where
+      seg = translateY 0.5 $ hrule 10
+      slash = rotate (Deg 60.0) (hrule 12)
+      equals = seg === strutY 3 === seg
+      diamond l r xs = undefined
+      helper '-'  = seg
+      helper '+'  = seg <> rotate (Deg 90.0) seg
+      helper '='  = equals
+      helper '#'  = equals <> rotate (Deg 90.0) equals
+      helper '/'  = slash
+      helper '\\' = scaleX (-1) slash
+      --TODO: better enclosure.
+      {-
+      helper '<'  =
+        case map reverse . splitOn ">" $ reverse xs of
+          [post, pre] -> diamond True True pre ||| drawOp post
+          _           -> diamond True False xs
+      helper (p:'>':xs) = diamond 
+      -}
+      helper '|' = vrule 16
+      
+      helper '.' = circle 4
+      helper x = centerXY $ drawText [x]
+
+{-
+  | Let l (Binds l) (Exp l)
+  | If l (Exp l) (Exp l) (Exp l)
+  | Case l (Exp l) [Alt l]
+  | Do l [Stmt l]
+  | MDo l [Stmt l]
+  | Tuple l [Exp l]
+  | TupleSection l [Maybe (Exp l)]
+  | List l [Exp l]
+  | Paren l (Exp l)
+  | LeftSection l (Exp l) (QOp l)
+  | RightSection l (QOp l) (Exp l)
+  | RecConstr l (QName l) [FieldUpdate l]
+  | RecUpdate l (Exp l) [FieldUpdate l]
+  | ListComp l (Exp l) [QualStmt l]
+  | ParComp l (Exp l) [[QualStmt l]]
+  | ExpTypeSig l (Exp l) (Type l)
+  | VarQuote l (QName l)
+  | TypQuote l (QName l)
+  | BracketExp l (Bracket l)
+  | SpliceExp l (Splice l)
+  | QuasiQuote l String String
+  | XTag l (XName l) [XAttr l] (Maybe (Exp l)) [Exp l]
+  | XETag l (XName l) [XAttr l] (Maybe (Exp l))
+  | XPcdata l String
+  | XExpTag l (Exp l)
+  | XChildTag l [Exp l]
+  | CorePragma l String (Exp l)
+  | SCCPragma l String (Exp l)
+  | GenPragma l String (Int, Int) (Int, Int) (Exp l)
+  | Proc l (Pat l) (Exp l)
+  | LeftArrApp l (Exp l) (Exp l)
+  | RightArrApp l (Exp l) (Exp l)
+  | LeftArrHighApp l (Exp l) (Exp l)
+  | RightArrHighApp l (Exp l) (Exp l)
+-}
 
 type TypeDiagram = [AsstS] -> TypeS -> CairoDiagram
 
@@ -196,18 +380,21 @@ ltrail = Trail . map Linear
 scaleXY (x, y) = scaleX x . scaleY y
 
 hsep, vsep
-  :: ( HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a
+  :: ( HasOrigin a, Enveloped a, Monoid a, Semigroup a, Juxtaposable a
      , V a ~ (Double, Double) )
   => [a] -> a
 hsep = hcat' (def {sep = 1})
 vsep = vcat' (def {sep = 1})
 
 hsep', vsep' 
-  :: ( HasOrigin a, Boundable a, Monoid a, Semigroup a, Juxtaposable a
+  :: ( HasOrigin a, Enveloped a, Monoid a, Semigroup a, Juxtaposable a
      , V a ~ (Double, Double) )
   => Double -> [a] -> a
 hsep' s = hcat' (def {sep = s})
 vsep' s = vcat' (def {sep = s})
+
+drawSeg v = stroke . pathFromTrail
+          $ Trail [Linear v] False
 
 stroked :: Path R2 -> CairoDiagram
 stroked = stroke' (def { vertexNames = [] :: [[Int]] })
@@ -215,20 +402,28 @@ stroked = stroke' (def { vertexNames = [] :: [[Int]] })
 infixl 6 ===
 infixl 6 |||
 
+(|||), (===)
+  :: ( Monoid a, Juxtaposable a, HasOrigin a, Enveloped a, Semigroup a
+     , V a ~ (Double, Double))
+  => a -> a -> a
+
 x === y = vsep [x, y]
 x ||| y = hsep [x, y]
 
 setRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
-setRectBounds r2 = setBounds bnds
+setRectBounds r2 = setEnvelope bnds
  where
-  bnds = getBounds $ centerXY $ Path
+  bnds = getEnvelope $ centerXY $ Path
     [ (P zeroV, ltrail [ r2 ] False) ]
 
 expandRectBounds :: R2 -> Diagram b R2 -> Diagram b R2
 expandRectBounds (x, y) d = setRectBounds (width d + x, height d + y) d
 
-text' :: String -> CairoDiagram
-text' = centerY . textLineBounded (fontSize 14)
+texts :: String -> CairoDiagram
+texts = centerY . textLineBounded (fontSize 14)
+
+texts' :: String -> CairoDiagram
+texts' = centerY . scale 0.1 . textLineBounded (fontSize 14)
 
 arrow :: ( Floating (Scalar t)
          , Num t
@@ -257,8 +452,10 @@ bannana (x, y) t1 t2 = centerY $ Path $ [(P (0, -y), Trail segs True)]
       ++ [Linear (-t2, 0)]
       ++ arcTrail (-40) 40 (x - t1, -y)
 
+firstTrail :: Path R2 -> [Segment R2]
 firstTrail (Path ((_, Trail t _):_)) = t
 
+arcTrail :: Double -> Double -> R2 -> [Segment R2]
 arcTrail ld hd v = firstTrail $ scaleXY v $ arc (Deg ld) (Deg hd)
 
 squiggle :: Double -> Path R2
@@ -277,13 +474,17 @@ cross v = Path [ (P v,      Trail [Linear $ v ^* (-2)] False)
                , (P $ cw v, Trail [Linear $ ccw (v ^* 2)]     False)
                ]
 
+lined :: Path R2 -> CairoDiagram
 lined = lineWidth 1 . stroked
+
+{-
 barTop d    = (lined . hrule $ width d) 
                ===
               centerX d
 barBottom d = centerX d 
                ===
               (lined . hrule $ width d)
+ -}
 
 typeDiagram :: IsName t
   => t
@@ -296,7 +497,7 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
   prim ident s
     = case M.lookup ident dm of
         Just d  -> named (ident, s) d
-        Nothing -> named (ident, s) $ text' ident
+        Nothing -> named (ident, s) $ texts' ident
 
   primT ty = prim (trim $ prettyPrint ty) (getSpan' ty)
 
@@ -307,7 +508,7 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
     ]
 
   rec :: TypeDiagram
-  rec ctx t = nameEnds t $ draw t
+  rec ctx ty = nameEnds ty $ draw ty
    where
     recc = rec ctx
 
@@ -324,7 +525,6 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
       Just d -> d
       _ -> let parts = hsep $ map recc ts
             in moveOriginBy (0, -1.3)
-             -- . vsep' (-0.7) . (\p -> [topper (width p), p])
              $ centerX parts
      where
       ts = splitTApp t
@@ -332,7 +532,7 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
     draw (TyForall _ Nothing ctx' t) = -- rec ctx t --TODO 
       rec (ctx ++ get contextList ctx') t
     draw (TyForall _ bnds ctx' t)
-      = ( text' "A" # scaleY (-1)
+      = ( texts' "A" # scaleY (-1)
 --           ||| -- ===
 --          vsep (zipWith prim (getVars bnds))
            ||| text "." # scaleXY (0.2, 0.2)
@@ -347,8 +547,6 @@ typeDiagram pre dm usr = (=== strutY 2) . rec []
     draw (TyInfix s l o r) = recc (TyApp s (TyApp s (TyCon s o) l) r)
     draw (TyKind _ t _)    = recc t
 
-    topper w = lined $ rotate (Deg (-90))
-             $ bracket (1, w + 1)
     tcross   = lined $ cross (0.5, 0.5)
     bracketDia d = hsep [ centerY . lined $ bracket (1, h), d, centerY . lined $ bracket (-1, h) ]
      where h = height d
