@@ -8,7 +8,7 @@
    3 .run with: ghci -package ghc
 -}
 
-module Panopti.GHC where
+module GhcRunner where
 
 import Data.Generics.Schemes
 import Data.Generics.Aliases
@@ -19,6 +19,7 @@ import qualified Outputable            as GHC
 import qualified MonadUtils            as GHC
 import qualified NameSet               as GHC
 import qualified HsLit                 as GHC
+import qualified TcEvidence            as GHC
 
 import PprTyThing
 import DynFlags
@@ -31,6 +32,8 @@ import Var(Var)
 import FastString(FastString)
 import NameSet(NameSet,nameSetToList)
 import Data.List (intersperse)
+import System.IO.Unsafe (unsafePerformIO)
+import Data.IORef (readIORef)
 
 import GHC.Paths ( libdir )
 import Data.Data
@@ -101,6 +104,7 @@ showData stage n =
           `extQ` bagName `extQ` bagRdrName `extQ` bagVar `extQ` nameSet
           `extQ` postTcType `extQ` fixity
           `extQ` syntaxExprExpr `extQ` syntaxExprStmt `extQ` syntaxExprOlit
+--          `extQ` tcEvBinds `extQ` evBindsVar
   where generic :: Data a => a -> String
         generic t = indent n ++ "(" ++ showConstr (toConstr t)
                  ++ space (concat (intersperse " " (gmapQ (showData stage (n+1)) t))) ++ ")"
@@ -113,7 +117,7 @@ showData stage n =
 
         br n = (("{" ++ n) ++) . (++ "}")
         brshow n = br n . show
-        brppr  n = br n . showSDoc . ppr 
+        brppr  n = br n . showSDoc . ppr
         brblb  n = br n . list . bagToList
 
         occName    = br    "OccName: " . OccName.occNameString
@@ -128,6 +132,17 @@ showData stage n =
         bagRdrName = brblb "BLB RdrName: " :: BLB RdrName -> String
         bagName    = brblb "BLB Name: "    :: BLB Name    -> String
         bagVar     = brblb "BLB Name: "    :: BLB Var     -> String
+
+{-
+        tcEvBinds (GHC.EvBinds bag) = brblb "EvBinds: "   $ bag
+        tcEvBinds (GHC.TcEvBinds v) = br    "TcEvBinds: " $ showData stage n v
+
+        evBindsVar (GHC.EvBindsVar iom u)
+          = brppr u ++ "!: "
+         ++ (evBindMap . unsafePerformIO $ readIORef iom)
+
+        evBindMap (GHC.EvBindMap m) = brppr "EvBindMap: " m
+ -}
 
         nameSet | stage `elem` [Parser,TypeChecker] 
                 = const ("{!NameSet placeholder here!}") :: NameSet -> String
